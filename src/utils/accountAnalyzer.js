@@ -3,6 +3,7 @@
 
 import { Chess } from 'chess.js';
 import { evalToWinPercentWhite, classifyMoveFromEvalDrop } from './stockfishEngine.js';
+import { detectOpeningAndVariation } from './openingBook.js';
 
 // İlk hamlelerden hızlı ECO & Açılış İsmi Tespit Sözlüğü (API'den açılış adı gelmezse yedek olarak kullanılır)
 const QUICK_OPENING_PREFIXES = [
@@ -34,6 +35,35 @@ const QUICK_OPENING_PREFIXES = [
 ];
 
 function cleanChessComOpeningUrl(ecoUrl, pgnText = '') {
+  // Önce PGN içerisindeki hamlelerden GM2600 açılış & alt varyant ağacını kontrol et
+  if (pgnText) {
+    try {
+      const bodyOnly = pgnText.replace(/\[[^\]]*\]/g, ' ').trim();
+      const sanTokens = bodyOnly
+        .replace(/\{[^}]*\}/g, ' ')
+        .replace(/\d+\.(\.\.)?/g, ' ')
+        .replace(/(1-0|0-1|1\/2-1\/2|\*)/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 18);
+
+      if (sanTokens.length >= 2) {
+        const gmDetected = detectOpeningAndVariation(sanTokens);
+        if (
+          gmDetected &&
+          gmDetected.name !== 'Şah Piyonu Açılışı (1. e4)' &&
+          gmDetected.name !== 'Vezir Piyonu Açılışı (1. d4)' &&
+          gmDetected.name !== 'Kanat / Hipermodern Açılış'
+        ) {
+          return `${gmDetected.eco} • ${gmDetected.name}: ${gmDetected.variation}`;
+        }
+      }
+    } catch {
+      // fallback
+    }
+  }
+
   if (ecoUrl && typeof ecoUrl === 'string' && ecoUrl.includes('/openings/')) {
     const rawSlug = ecoUrl.split('/openings/')[1] || '';
     const cleaned = decodeURIComponent(rawSlug)
@@ -50,7 +80,7 @@ function cleanChessComOpeningUrl(ecoUrl, pgnText = '') {
 
   for (const item of QUICK_OPENING_PREFIXES) {
     if (pgnText.includes(item.prefix)) {
-      return item.name;
+      return `${item.eco} • ${item.name}`;
     }
   }
   return 'Standart / Diğer Açılış';
@@ -264,9 +294,13 @@ export async function fetchLichessGames(username, maxGames = 150, onProgress = n
       if (totalMoves < 2) continue;
 
       const ecoCode = g.opening?.eco || extractPgnHeader(g.pgn, 'ECO') || 'A00';
+      const gmDetected = detectOpeningAndVariation(movesArr.slice(0, 18));
       const openingName =
-        g.opening?.name?.split(':')[0]?.trim() ||
-        cleanChessComOpeningUrl('', g.pgn || '');
+        g.opening?.name
+          ? `${ecoCode} • ${g.opening.name}`
+          : gmDetected
+          ? gmDetected.fullTitle
+          : cleanChessComOpeningUrl('', g.pgn || '');
 
       const createdAt = g.createdAt || Date.now();
       const dateStr = new Date(createdAt).toLocaleDateString('tr-TR');

@@ -44,7 +44,12 @@ import {
   getEngineParamsForElo,
   classifyMoveFromEvalDrop,
 } from './utils/stockfishEngine.js';
-import { FAMOUS_OPENINGS, lookupOpeningBook } from './utils/openingBook.js';
+import {
+  FAMOUS_OPENINGS,
+  lookupOpeningBook,
+  detectOpeningAndVariation,
+  fetchGM2600MastersExplorer,
+} from './utils/openingBook.js';
 
 const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const EMPTY_BOARD_FEN = '8/8/8/8/8/8/8/8 w - - 0 1';
@@ -276,6 +281,7 @@ export default function App() {
   const [showAnalysisArrows, setShowAnalysisArrows] = useState(true);
   const [showOpeningArrows, setShowOpeningArrows] = useState(true);
   const [liveAnalysisLines, setLiveAnalysisLines] = useState([]);
+  const [liveMastersOpeningData, setLiveMastersOpeningData] = useState(null);
   const [evalScore, setEvalScore] = useState({ type: 'cp', value: 0.2, depth: 12 });
 
   // Tahta Yapıcı (Board Editor)
@@ -1063,11 +1069,54 @@ export default function App() {
     isViewingPastMove,
   ]);
 
-  // Açılış Kitabı Eşleşmesi (Analiz Modunda)
+  // Açılış Kitabı Eşleşmesi (Analiz Modunda: Hem yerel GM2600.bin hem canlı Lichess Masters 2600+ GM Veritabanı)
+  useEffect(() => {
+    if (appMode !== 'analysis' || isBoardEditorOpen) return;
+    let cancelled = false;
+    const localBook = lookupOpeningBook(analysisFen);
+    if (localBook) setLiveMastersOpeningData(localBook);
+
+    fetchGM2600MastersExplorer(analysisFen).then((res) => {
+      if (!cancelled && res) {
+        setLiveMastersOpeningData(res);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [appMode, isBoardEditorOpen, analysisFen]);
+
   const currentOpeningBookMatch = useMemo(() => {
     if (appMode !== 'analysis' || isBoardEditorOpen) return null;
-    return lookupOpeningBook(analysisFen);
-  }, [appMode, isBoardEditorOpen, analysisFen]);
+    return liveMastersOpeningData || lookupOpeningBook(analysisFen);
+  }, [appMode, isBoardEditorOpen, liveMastersOpeningData, analysisFen]);
+
+  // Oynanan Maçın veya Analiz Tahtasının Anlık GM2600 Açılış & Varyant İsmi
+  const activePlayOpeningInfo = useMemo(() => {
+    return detectOpeningAndVariation(moveHistory.slice(0, activePlayPly));
+  }, [moveHistory, activePlayPly]);
+
+  const activeAnalysisOpeningInfo = useMemo(() => {
+    const localDetected = detectOpeningAndVariation(
+      analysisHistory.slice(0, analysisPly)
+    );
+    if (
+      liveMastersOpeningData &&
+      liveMastersOpeningData.name &&
+      liveMastersOpeningData.name !== 'Büyükusta (GM2600) Teori Konumu'
+    ) {
+      return {
+        eco: liveMastersOpeningData.eco || localDetected.eco,
+        name: liveMastersOpeningData.name,
+        variation: localDetected.variation,
+        fullTitle: `${liveMastersOpeningData.eco || localDetected.eco} • ${
+          liveMastersOpeningData.name
+        }`,
+      };
+    }
+    return localDetected;
+  }, [analysisHistory, analysisPly, liveMastersOpeningData]);
 
   // TAHTA ÜZERİNDEKİ OKLAR (Stockfish En İyi Devam Yolları + Açılış Kitabı Okları + Maç Sonu İnceleme Okları)
   const boardArrows = useMemo(() => {
@@ -1967,6 +2016,26 @@ export default function App() {
                   </span>
                 </div>
 
+                {/* CANLI GM2600 AÇILIŞ VE VARYANT İSMİ BANDI */}
+                <div className="px-3.5 py-2 bg-[#22201c] border-b border-[#3c3934] flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <BookOpen className="w-3.5 h-3.5 text-[#f0c15c] shrink-0" />
+                    <div className="truncate">
+                      <span className="text-[11px] font-extrabold px-1.5 py-0.5 rounded bg-[#f0c15c]/20 text-[#f5d07e] mr-1.5 font-mono">
+                        {activePlayOpeningInfo.eco}
+                      </span>
+                      <span className="text-xs font-bold text-white">
+                        {activePlayOpeningInfo.name}
+                      </span>
+                      {activePlayOpeningInfo.variation && (
+                        <span className="text-[11px] text-[#bababa] block truncate">
+                          Varyant: {activePlayOpeningInfo.variation}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
                 {/* İleri / Geri Gezinme Butonları */}
                 <div className="grid grid-cols-4 bg-[#1a1816] border-b border-[#3c3934] divide-x divide-[#2e2b27]">
                   <button
@@ -2403,43 +2472,55 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Açılış Kitabı Önerileri (Mevcut Konum Açılış Kitabında Varsa) */}
-                {!isBoardEditorOpen && currentOpeningBookMatch && (
+                {/* Açılış Kitabı Önerileri (GM2600.bin + Canlı Lichess Masters 2600+ GM Veritabanı) */}
+                {!isBoardEditorOpen && (
                   <div className="p-3 bg-[#22201d] border-b border-[#3c3934] space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-[#f5d07e] flex items-center gap-1.5">
-                        <BookOpen className="w-3.5 h-3.5" />
-                        {currentOpeningBookMatch.eco} •{' '}
-                        {currentOpeningBookMatch.name}
-                      </span>
-                      <span className="text-[10px] text-[#999]">
-                        Lichess Masters
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      {currentOpeningBookMatch.continuations.map((cont) => (
-                        <button
-                          key={cont.san}
-                          type="button"
-                          onClick={() =>
-                            attemptAnalysisMove(cont.from, cont.to)
-                          }
-                          className="px-2.5 py-1.5 rounded bg-[#1a1816] hover:bg-[#302e2c] border border-[#3c3934] text-left flex items-center justify-between transition-colors"
-                        >
-                          <div>
-                            <span className="text-xs font-bold text-[#f5d07e] font-mono">
-                              {cont.san}
-                            </span>
-                            <div className="text-[10px] text-[#999] truncate">
-                              {cont.note}
-                            </div>
-                          </div>
-                          <span className="text-[10px] font-bold text-[#8cd936]">
-                            {cont.winRate}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-xs font-bold text-[#f5d07e] flex items-center gap-1.5 truncate">
+                          <BookOpen className="w-3.5 h-3.5 shrink-0" />
+                          {activeAnalysisOpeningInfo.eco} •{' '}
+                          {activeAnalysisOpeningInfo.name}
+                        </span>
+                        {activeAnalysisOpeningInfo.variation && (
+                          <span className="text-[11px] text-[#bababa] block truncate">
+                            Varyant: {activeAnalysisOpeningInfo.variation}
                           </span>
-                        </button>
-                      ))}
+                        )}
+                      </div>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#f0c15c]/20 text-[#f5d07e] font-bold shrink-0">
+                        GM2600 Book
+                      </span>
                     </div>
+
+                    {currentOpeningBookMatch &&
+                      currentOpeningBookMatch.continuations &&
+                      currentOpeningBookMatch.continuations.length > 0 && (
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {currentOpeningBookMatch.continuations.map((cont) => (
+                            <button
+                              key={cont.san}
+                              type="button"
+                              onClick={() =>
+                                attemptAnalysisMove(cont.from, cont.to)
+                              }
+                              className="px-2.5 py-1.5 rounded bg-[#1a1816] hover:bg-[#302e2c] border border-[#3c3934] text-left flex items-center justify-between transition-colors"
+                            >
+                              <div className="min-w-0">
+                                <span className="text-xs font-bold text-[#f5d07e] font-mono">
+                                  {cont.san}
+                                </span>
+                                <div className="text-[10px] text-[#999] truncate">
+                                  {cont.note}
+                                </div>
+                              </div>
+                              <span className="text-[10px] font-bold text-[#8cd936] ml-1 shrink-0">
+                                {cont.games || cont.winRate}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                   </div>
                 )}
 
