@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+}
+
+/* Lichess Şah Çekme Radyal Parlama Efekti */
+.lichess-check-glow {
+  background: radial-gradient(
+    ellipse at center,
+    rgba(255, 0, 0, 1) 0%,
+    rgba(231, 0, 0, 0.88) 25%,
+    rgba(169, 0, 0, 0) 89%,
+    rgba(158, 0, 0, 0) 100%
+  );
+}
+
+/* Lichess Taş Yakalama Köşe İşaretleri */
+.lichess-capture-ring {
+  background: radial-gradient(transparent 0%, transparent 79%, rgba(20, 85, 30, 0.35) 80%);
+}
+
+/* Özel İnce Kaydırma Çubuğu */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #1e1c1a;
+}
+::-webkit-scrollbar-thumb {
+  background: #3e3b37;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #55514c;
+}
