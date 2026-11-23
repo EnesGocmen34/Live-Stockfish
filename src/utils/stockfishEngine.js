@@ -1,5 +1,7 @@
 // Stockfish Single-Threaded Web Worker Yöneticisi
-// Render.com ücretsiz planında 0ms ağ gecikmesi ve COOP/COEP (SharedArrayBuffer) hatası olmadan çalışır.
+// 1) Elo ayarlı bot maçı
+// 2) Analiz Stüdyosu için en iyi devam yolları (PV) ve ok koordinatları
+// 3) Maç Sonu İncelemesi (Game Review) için hamle doğruluk (% Accuracy) ve sınıflandırma (En İyi, İnce, Yanlışlık, Hata, Büyük Hata) motoru
 
 export const ELO_PRESETS = [
   { elo: 800, label: 'Başlangıç', badge: 'Seviye 1' },
@@ -13,9 +15,53 @@ export const ELO_PRESETS = [
   { elo: 2800, label: 'Süper GM (Max)', badge: 'Maksimum' },
 ];
 
+export const MOVE_CLASSIFICATIONS = {
+  best: {
+    id: 'best',
+    label: 'En İyi Hamle',
+    symbol: '★',
+    color: '#629924',
+    bgClass: 'bg-[#629924]/25 text-[#8cd936] border-[#629924]',
+  },
+  excellent: {
+    id: 'excellent',
+    label: 'Çok İyi',
+    symbol: '!',
+    color: '#73b32b',
+    bgClass: 'bg-[#73b32b]/20 text-[#9be544] border-[#73b32b]/60',
+  },
+  good: {
+    id: 'good',
+    label: 'İyi',
+    symbol: '✓',
+    color: '#8ca2ad',
+    bgClass: 'bg-[#8ca2ad]/20 text-[#c5d6df] border-[#8ca2ad]/50',
+  },
+  inaccuracy: {
+    id: 'inaccuracy',
+    label: 'Yanlışlık (?!)',
+    symbol: '?!',
+    color: '#f0c15c',
+    bgClass: 'bg-[#f0c15c]/20 text-[#f5d07e] border-[#f0c15c]/60',
+  },
+  mistake: {
+    id: 'mistake',
+    label: 'Hata (?)',
+    symbol: '?',
+    color: '#e68a2e',
+    bgClass: 'bg-[#e68a2e]/20 text-[#f4a456] border-[#e68a2e]/60',
+  },
+  blunder: {
+    id: 'blunder',
+    label: 'Büyük Hata (??)',
+    symbol: '??',
+    color: '#db3b3b',
+    bgClass: 'bg-[#db3b3b]/25 text-[#ff7373] border-[#db3b3b]/70',
+  },
+};
+
 export function getEngineParamsForElo(elo) {
   const clamped = Math.max(800, Math.min(2850, Number(elo) || 1500));
-  // Skill Level 0..20 arası doğrusal eşleme + düşük Elo'larda derinlik & hata payı kontrolü
   const skillLevel = Math.round(((clamped - 800) / (2800 - 800)) * 20);
   let depth = 15;
   let movetime = 600;
@@ -51,7 +97,63 @@ export function getEngineParamsForElo(elo) {
     skillLevel: Math.max(0, Math.min(20, skillLevel)),
     depth,
     movetime,
-    limitStrength: clamped < 2750
+    limitStrength: clamped < 2750,
+  };
+}
+
+// Lichess kazanma olasılığı (Win%) ve Hamle Doğruluğu (% Accuracy) formülü
+export function evalToWinPercentWhite(evalObj) {
+  if (!evalObj) return 50;
+  let cp = 0;
+  if (evalObj.type === 'mate') {
+    cp = evalObj.value > 0 ? 3000 : -3000;
+  } else {
+    cp = (evalObj.value || 0) * 100;
+  }
+  return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * cp)) - 1);
+}
+
+export function classifyMoveFromEvalDrop(prevEval, nextEval, moverColor, playedUci, bestMoveUci) {
+  const winBeforeWhite = evalToWinPercentWhite(prevEval);
+  const winAfterWhite = evalToWinPercentWhite(nextEval);
+
+  const winBeforeMover = moverColor === 'w' ? winBeforeWhite : 100 - winBeforeWhite;
+  const winAfterMover = moverColor === 'w' ? winAfterWhite : 100 - winAfterWhite;
+
+  const winDrop = Math.max(0, winBeforeMover - winAfterMover);
+
+  // Lichess hamle doğruluğu formülü: 103.1668 * exp(-0.04354 * winDrop) - 3.1669
+  const rawAcc = 103.1668 * Math.exp(-0.04354 * winDrop) - 3.1669;
+  const accuracy = Math.max(0, Math.min(100, rawAcc));
+
+  // Eğer motorun 1 numaralı hamlesi oynandıysa doğrudan "best"
+  if (bestMoveUci && playedUci && playedUci.slice(0, 4) === bestMoveUci.slice(0, 4)) {
+    return {
+      classification: 'best',
+      accuracy: Math.max(96, accuracy),
+      winDrop,
+    };
+  }
+
+  let classification = 'good';
+  if (winDrop <= 2.2) {
+    classification = 'best';
+  } else if (winDrop <= 5.5) {
+    classification = 'excellent';
+  } else if (winDrop <= 10.5) {
+    classification = 'good';
+  } else if (winDrop <= 18.0) {
+    classification = 'inaccuracy';
+  } else if (winDrop <= 30.0) {
+    classification = 'mistake';
+  } else {
+    classification = 'blunder';
+  }
+
+  return {
+    classification,
+    accuracy,
+    winDrop,
   };
 }
 
@@ -63,10 +165,11 @@ export class StockfishController {
     this.pendingMoveResolve = null;
     this.onEvalUpdate = null;
     this.currentTurnColor = 'w';
+    this.latestLines = {};
   }
 
   async init() {
-    if (this.worker) return;
+    if (this.worker) return true;
 
     return new Promise((resolve) => {
       try {
@@ -86,7 +189,7 @@ export class StockfishController {
         } else if (line === 'readyok') {
           this.isReady = true;
           resolve(true);
-        } else if (line.startsWith('info ') && line.includes(' score ')) {
+        } else if (line.startsWith('info ') && line.includes(' score ') && line.includes(' pv ')) {
           this.parseEvalInfo(line);
         } else if (line.startsWith('bestmove ')) {
           const parts = line.split(/\s+/);
@@ -94,7 +197,10 @@ export class StockfishController {
           if (this.pendingMoveResolve) {
             const cb = this.pendingMoveResolve;
             this.pendingMoveResolve = null;
-            cb(bestMoveUci && bestMoveUci !== '(none)' ? bestMoveUci : null);
+            cb({
+              bestMove: bestMoveUci && bestMoveUci !== '(none)' ? bestMoveUci : null,
+              lines: Object.values(this.latestLines).sort((a, b) => a.multipv - b.multipv),
+            });
           }
         }
       };
@@ -115,30 +221,53 @@ export class StockfishController {
   }
 
   parseEvalInfo(line) {
-    if (!this.onEvalUpdate) return;
-    // "score cp 34" veya "score mate -2" ayrıştırması
     const mateMatch = line.match(/score mate (-?\d+)/);
     const cpMatch = line.match(/score cp (-?\d+)/);
     const depthMatch = line.match(/depth (\d+)/);
-    const depth = depthMatch ? parseInt(depthMatch[1], 10) : 1;
+    const multipvMatch = line.match(/multipv (\d+)/);
+    const pvMatch = line.match(/ pv (.+)$/);
 
+    const depth = depthMatch ? parseInt(depthMatch[1], 10) : 1;
+    const multipv = multipvMatch ? parseInt(multipvMatch[1], 10) : 1;
+    const pvMoves = pvMatch ? pvMatch[1].trim().split(/\s+/) : [];
+    const firstMove = pvMoves[0] || null;
+
+    let scoreObj = null;
     if (mateMatch) {
       let mateVal = parseInt(mateMatch[1], 10);
-      // UCI skoru sırası gelen oyuncuya göredir; her zaman Beyaz perspektifine çevir
       if (this.currentTurnColor === 'b') mateVal = -mateVal;
-      this.onEvalUpdate({
+      scoreObj = {
         type: 'mate',
         value: mateVal,
-        depth
-      });
+        depth,
+        multipv,
+        pv: pvMoves,
+        bestMove: firstMove,
+      };
     } else if (cpMatch) {
       let cpVal = parseInt(cpMatch[1], 10);
       if (this.currentTurnColor === 'b') cpVal = -cpVal;
-      this.onEvalUpdate({
+      scoreObj = {
         type: 'cp',
-        value: cpVal / 100, // Piyon birimi (örn. +1.25)
-        depth
-      });
+        value: cpVal / 100,
+        depth,
+        multipv,
+        pv: pvMoves,
+        bestMove: firstMove,
+      };
+    }
+
+    if (scoreObj) {
+      this.latestLines[multipv] = scoreObj;
+      if (this.onEvalUpdate) {
+        const sortedLines = Object.values(this.latestLines).sort(
+          (a, b) => a.multipv - b.multipv
+        );
+        this.onEvalUpdate({
+          primary: sortedLines[0] || scoreObj,
+          lines: sortedLines,
+        });
+      }
     }
   }
 
@@ -147,7 +276,7 @@ export class StockfishController {
     if (this.pendingMoveResolve) {
       const cb = this.pendingMoveResolve;
       this.pendingMoveResolve = null;
-      cb(null);
+      cb({ bestMove: null, lines: [] });
     }
     if (this.worker && this.isReady) {
       this.send('stop');
@@ -158,15 +287,21 @@ export class StockfishController {
     this.stop();
     if (!this.worker) return;
     const params = getEngineParamsForElo(elo);
+    this.latestLines = {};
     this.send('ucinewgame');
+    this.send('setoption name MultiPV value 1');
     this.send(`setoption name Skill Level value ${params.skillLevel}`);
     this.send(`setoption name UCI_LimitStrength value ${params.limitStrength ? 'true' : 'false'}`);
     this.send(`setoption name UCI_Elo value ${params.elo}`);
     if (params.elo < 1400) {
-      // Düşük Elo'larda daha insansı taktik hatalar için
       const errProb = Math.min(900, Math.round((1500 - params.elo) * 1.1));
       this.send(`setoption name Skill Level Maximum Error value ${errProb}`);
-      this.send(`setoption name Skill Level Probability value ${Math.max(10, 140 - Math.round(params.elo / 12))}`);
+      this.send(
+        `setoption name Skill Level Probability value ${Math.max(
+          10,
+          140 - Math.round(params.elo / 12)
+        )}`
+      );
     }
     this.send('isready');
   }
@@ -177,14 +312,16 @@ export class StockfishController {
 
     const requestId = ++this.currentRequestId;
     this.currentTurnColor = turnColor;
+    this.latestLines = {};
     const params = getEngineParamsForElo(elo);
 
+    this.send('setoption name MultiPV value 1');
     this.send(`setoption name Skill Level value ${params.skillLevel}`);
     this.send(`setoption name UCI_LimitStrength value ${params.limitStrength ? 'true' : 'false'}`);
     this.send(`setoption name UCI_Elo value ${params.elo}`);
     this.send(`position fen ${fen}`);
 
-    const rawMove = await new Promise((resolve) => {
+    const result = await new Promise((resolve) => {
       this.pendingMoveResolve = resolve;
       this.send(`go depth ${params.depth} movetime ${params.movetime}`);
     });
@@ -192,14 +329,32 @@ export class StockfishController {
     if (requestId !== this.currentRequestId) {
       return null;
     }
-    return rawMove;
+    return result.bestMove;
   }
 
-  async evaluatePosition(fen, turnColor = 'w') {
+  // Analiz Tahtası veya Maç Sonu İnceleme için tam güçte (Skill 20) Çoklu Varyant (MultiPV) analizi
+  async analyzePosition(fen, turnColor = 'w', { depth = 13, multiPV = 3, movetime = 450 } = {}) {
     await this.init();
+    this.stop();
+
+    const requestId = ++this.currentRequestId;
     this.currentTurnColor = turnColor;
+    this.latestLines = {};
+
+    this.send('setoption name Skill Level value 20');
+    this.send('setoption name UCI_LimitStrength value false');
+    this.send(`setoption name MultiPV value ${multiPV}`);
     this.send(`position fen ${fen}`);
-    this.send('go depth 10');
+
+    const result = await new Promise((resolve) => {
+      this.pendingMoveResolve = resolve;
+      this.send(`go depth ${depth} movetime ${movetime}`);
+    });
+
+    if (requestId !== this.currentRequestId) {
+      return null;
+    }
+    return result;
   }
 
   destroy() {
