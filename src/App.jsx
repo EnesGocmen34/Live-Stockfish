@@ -29,10 +29,13 @@ import {
   Award,
   Swords,
   Lock,
+  BarChart3,
 } from 'lucide-react';
 import ChessBoard, { BOARD_THEMES } from './components/ChessBoard.jsx';
 import ChessPiece from './components/ChessPieces.jsx';
 import EvalBar from './components/EvalBar.jsx';
+import AccountScout from './components/AccountScout.jsx';
+import { parseGameMovesAndTimeline } from './utils/accountAnalyzer.js';
 import { soundEngine } from './utils/soundEngine.js';
 import {
   StockfishController,
@@ -732,6 +735,67 @@ export default function App() {
     soundEngine.playMove();
   };
 
+  // Chess.com / Lichess Hesap Analizinden Seçilen Bir Maçı Doğrudan Serbest Analiz Stüdyosunda Aç
+  const handleOpenImportedGameInAnalysis = (gameItem) => {
+    if (!gameItem || !gameItem.pgn) return;
+    const { history, fens } = parseGameMovesAndTimeline(gameItem.pgn);
+    if (fens.length === 0) return;
+
+    const loaded = new Chess();
+    try {
+      loaded.load(fens[fens.length - 1]);
+    } catch {
+      // ignore
+    }
+
+    analysisGameRef.current = loaded;
+    setOrientation(gameItem.userColor || 'w');
+    setIsBoardEditorOpen(false);
+    setAnalysisTimeline(fens);
+    setAnalysisHistory(history);
+    setAnalysisPly(0);
+    setAnalysisFen(fens[0]);
+    setAnalysisSelectedSq(null);
+    setAppMode('analysis');
+    soundEngine.playMove();
+  };
+
+  // Chess.com / Lichess Hesap Analizinden Seçilen Bir Maçı Hamle Hamle Doğruluk İnceleme (Game Review) Modunda Aç
+  const handleOpenImportedGameInFullReview = (gameItem) => {
+    if (!gameItem || !gameItem.pgn) return;
+    if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
+    if (engineRef.current) engineRef.current.stop();
+    setIsBotThinking(false);
+
+    const { history, fens } = parseGameMovesAndTimeline(gameItem.pgn);
+    if (history.length === 0) return;
+
+    const loaded = new Chess();
+    try {
+      loaded.loadPgn(gameItem.pgn);
+    } catch {
+      // ignore
+    }
+
+    gameRef.current = loaded;
+    const finalFen = fens[fens.length - 1];
+    const lastM = history[history.length - 1];
+
+    setPlayerColor(gameItem.userColor || 'w');
+    setOrientation(gameItem.userColor || 'w');
+    setFen(finalFen);
+    setFenTimeline(fens);
+    setMoveHistory(history);
+    setViewingPly(0);
+    setLastMove(lastM ? { from: lastM.from, to: lastM.to } : null);
+    setResignWinner(null);
+    setIsReviewingGame(true);
+    setDismissGameOverModal(true);
+    setGameReviewData(null);
+    setAppMode('play');
+    soundEngine.playMove();
+  };
+
   // Maçı Analiz Stüdyosuna Aktar
   const openCurrentMatchInAnalysisStudio = () => {
     if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
@@ -1329,12 +1393,12 @@ export default function App() {
               lichess<span className="text-[#629924] font-normal">.arena</span>
             </span>
 
-            {/* ANA MOD SEÇİCİ: BOTLA MAÇ vs STOCKFISH ANALİZ & TAHTA YAPICI */}
-            <div className="flex items-center bg-[#262421] p-0.5 rounded-md border border-[#3c3934] ml-1 sm:ml-3">
+            {/* ANA MOD SEÇİCİ: BOTLA MAÇ vs STOCKFISH ANALİZ & TAHTA YAPICI vs CHESS.COM/LICHESS HESAP ANALİZİ */}
+            <div className="flex flex-wrap items-center bg-[#262421] p-0.5 rounded-md border border-[#3c3934] ml-1 sm:ml-3">
               <button
                 type="button"
                 onClick={() => setAppMode('play')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-bold transition-colors ${
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded text-xs font-bold transition-colors ${
                   appMode === 'play'
                     ? 'bg-[#629924] text-white shadow'
                     : 'text-[#bababa] hover:text-white'
@@ -1351,7 +1415,7 @@ export default function App() {
                   setIsBotThinking(false);
                   setAppMode('analysis');
                 }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-bold transition-colors ${
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded text-xs font-bold transition-colors ${
                   appMode === 'analysis'
                     ? 'bg-[#3692e7] text-white shadow'
                     : 'text-[#bababa] hover:text-white'
@@ -1359,6 +1423,23 @@ export default function App() {
               >
                 <Compass className="w-3.5 h-3.5" />
                 Analiz & Tahta Yapıcı
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
+                  if (engineRef.current) engineRef.current.stop();
+                  setIsBotThinking(false);
+                  setAppMode('scout');
+                }}
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded text-xs font-bold transition-colors ${
+                  appMode === 'scout'
+                    ? 'bg-[#e68a2e] text-black shadow'
+                    : 'text-[#bababa] hover:text-white'
+                }`}
+              >
+                <BarChart3 className="w-3.5 h-3.5" />
+                Chess.com / Lichess Hesap Analizi
               </button>
             </div>
           </div>
@@ -1434,6 +1515,13 @@ export default function App() {
       </header>
 
       {/* ANA İÇERİK */}
+      {appMode === 'scout' ? (
+        <AccountScout
+          stockfishController={engineRef.current}
+          onOpenGameInAnalysis={handleOpenImportedGameInAnalysis}
+          onOpenGameInFullReview={handleOpenImportedGameInFullReview}
+        />
+      ) : (
       <main className="flex-1 max-w-7xl w-full mx-auto px-2 sm:px-6 py-4 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* SOL BÖLÜM: TAHTA + EVAL BAR (Sadece Analiz veya Maç Sonunda) */}
         <div className="lg:col-span-7 xl:col-span-8 flex flex-col items-center w-full">
@@ -2594,6 +2682,7 @@ export default function App() {
           )}
         </div>
       </main>
+      )}
 
       {/* YENİ MAÇ MODALI */}
       {showNewGameModal && (
