@@ -27,7 +27,7 @@ export function EvalBar({ evalScore, orientation = 'w', visible = true }) {
 
   return (
     <div
-      className="relative w-6 sm:w-7 self-stretch rounded overflow-hidden border border-[#3c3934] bg-[#262421] flex flex-col select-none shadow-inner"
+      className="relative w-4 sm:w-7 self-stretch rounded overflow-hidden border border-[#3c3934] bg-[#262421] flex flex-col select-none shadow-inner shrink-0"
       title={`Stockfish Değerlendirmesi: ${label}`}
     >
       {/* Üst ve alt dolgu: orientation === 'w' ise üstte Siyah, altta Beyaz */}
@@ -51,7 +51,7 @@ export function EvalBar({ evalScore, orientation = 'w', visible = true }) {
 
       {/* Skor metni */}
       <span
-        className={`absolute inset-x-0 text-[10px] font-bold text-center leading-tight px-0.5 pointer-events-none ${
+        className={`absolute inset-x-0 text-[8px] sm:text-[10px] font-bold text-center leading-tight px-0.5 pointer-events-none ${
           (isWhiteWinning && !isFlipped) || (!isWhiteWinning && isFlipped)
             ? 'bottom-1 text-[#161512]'
             : 'top-1 text-[#e8e6e3]'

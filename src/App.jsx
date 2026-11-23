@@ -1433,68 +1433,96 @@ export default function App() {
     <div className="min-h-screen bg-[#161512] text-[#bababa] flex flex-col">
       {/* ÜST LICHESS HEADER VE MOD GEÇİŞ SEKMELERİ */}
       <header className="border-b border-[#2e2b27] bg-[#1e1c18]/95 backdrop-blur sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded bg-[#262421] border border-[#3c3934] p-1 flex items-center justify-center">
-              <ChessPiece color="w" type="n" />
+        <div className="max-w-7xl mx-auto px-2.5 sm:px-6 py-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded bg-[#262421] border border-[#3c3934] p-1 flex items-center justify-center shrink-0">
+                <ChessPiece color="w" type="n" />
+              </div>
+              <span className="font-bold text-white tracking-tight text-base sm:text-lg">
+                lichess<span className="text-[#629924] font-normal">.arena</span>
+              </span>
             </div>
-            <span className="font-bold text-white tracking-tight text-base sm:text-lg">
-              lichess<span className="text-[#629924] font-normal">.arena</span>
-            </span>
 
-            {/* ANA MOD SEÇİCİ: BOTLA MAÇ vs STOCKFISH ANALİZ & TAHTA YAPICI vs CHESS.COM/LICHESS HESAP ANALİZİ */}
-            <div className="flex flex-wrap items-center bg-[#262421] p-0.5 rounded-md border border-[#3c3934] ml-1 sm:ml-3">
+            {/* Mobil Sağ Üst Hızlı Ses + Yeni Maç Butonu (Sadece Mobilde Görünür, PC'de sağ blokta) */}
+            <div className="flex sm:hidden items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => setAppMode('play')}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded text-xs font-bold transition-colors ${
-                  appMode === 'play'
-                    ? 'bg-[#629924] text-white shadow'
-                    : 'text-[#bababa] hover:text-white'
-                }`}
+                onClick={toggleMute}
+                className="p-1.5 rounded bg-[#262421] border border-[#3c3934] text-white"
+                title={muted ? 'Sesi Aç' : 'Sesi Kapat'}
               >
-                <Swords className="w-3.5 h-3.5" />
-                Botla Maç
+                {muted ? (
+                  <VolumeX className="w-4 h-4 text-red-400" />
+                ) : (
+                  <Volume2 className="w-4 h-4 text-[#629924]" />
+                )}
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
-                  if (engineRef.current) engineRef.current.stop();
-                  setIsBotThinking(false);
-                  setAppMode('analysis');
-                }}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded text-xs font-bold transition-colors ${
-                  appMode === 'analysis'
-                    ? 'bg-[#3692e7] text-white shadow'
-                    : 'text-[#bababa] hover:text-white'
-                }`}
-              >
-                <Compass className="w-3.5 h-3.5" />
-                Analiz & Tahta Yapıcı
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
-                  if (engineRef.current) engineRef.current.stop();
-                  setIsBotThinking(false);
-                  setAppMode('scout');
-                }}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded text-xs font-bold transition-colors ${
-                  appMode === 'scout'
-                    ? 'bg-[#e68a2e] text-black shadow'
-                    : 'text-[#bababa] hover:text-white'
-                }`}
-              >
-                <BarChart3 className="w-3.5 h-3.5" />
-                Chess.com / Lichess Hesap Analizi
-              </button>
+              {appMode === 'play' && (
+                <button
+                  type="button"
+                  onClick={() => setShowNewGameModal(true)}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded bg-[#629924] text-white text-xs font-bold shadow"
+                >
+                  <Play className="w-3 h-3 fill-current" />
+                  Yeni Maç
+                </button>
+              )}
             </div>
           </div>
 
-          {/* Sağ Üst Kontroller */}
-          <div className="flex items-center gap-2">
+          {/* ANA MOD SEÇİCİ: Mobilde tam genişlikte 3 eşit sekme, PC'de orijinal yatay grup */}
+          <div className="grid grid-cols-3 sm:flex items-center bg-[#262421] p-0.5 rounded-md border border-[#3c3934] w-full sm:w-auto">
+            <button
+              type="button"
+              onClick={() => setAppMode('play')}
+              className={`flex items-center justify-center gap-1.5 px-2 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-bold transition-colors truncate ${
+                appMode === 'play'
+                  ? 'bg-[#629924] text-white shadow'
+                  : 'text-[#bababa] hover:text-white'
+              }`}
+            >
+              <Swords className="w-3.5 h-3.5 shrink-0" />
+              <span>Botla Maç</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
+                if (engineRef.current) engineRef.current.stop();
+                setIsBotThinking(false);
+                setAppMode('analysis');
+              }}
+              className={`flex items-center justify-center gap-1.5 px-2 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-bold transition-colors truncate ${
+                appMode === 'analysis'
+                  ? 'bg-[#3692e7] text-white shadow'
+                  : 'text-[#bababa] hover:text-white'
+              }`}
+            >
+              <Compass className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Analiz & Yapıcı</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
+                if (engineRef.current) engineRef.current.stop();
+                setIsBotThinking(false);
+                setAppMode('scout');
+              }}
+              className={`flex items-center justify-center gap-1.5 px-2 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-bold transition-colors truncate ${
+                appMode === 'scout'
+                  ? 'bg-[#e68a2e] text-black shadow'
+                  : 'text-[#bababa] hover:text-white'
+              }`}
+            >
+              <BarChart3 className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Hesap Analizi</span>
+            </button>
+          </div>
+
+          {/* Sağ Üst Kontroller (PC ve Tablet Görünümü) */}
+          <div className="hidden sm:flex items-center gap-2">
             {/* Tahta Teması */}
             <div className="hidden md:flex items-center bg-[#262421] border border-[#3c3934] rounded p-0.5">
               {Object.values(BOARD_THEMES).map((t) => (
@@ -1751,6 +1779,211 @@ export default function App() {
 
             {/* Alt Bar */}
             {!isBoardEditorOpen && renderPlayerBar(bottomBarColor)}
+
+            {/* SADECE MOBİLDE GÖRÜNEN (`lg:hidden`) HIZLI HAMLE BANDI VE KONTROL ÇUBUĞU (PC FORMATINI HİÇ ETKİLEMEZ) */}
+            {!isBoardEditorOpen && (
+              <div className="flex lg:hidden flex-col gap-1.5 bg-[#262421] border border-[#3c3934] rounded-md p-2 shadow-md">
+                {/* Mobilde Canlı GM2600 Açılış & Varyant Özeti */}
+                <div className="flex items-center justify-between gap-2 px-1 text-[11px]">
+                  <div className="flex items-center gap-1.5 truncate">
+                    <BookOpen className="w-3.5 h-3.5 text-[#f0c15c] shrink-0" />
+                    <span className="font-mono font-bold text-[#f5d07e]">
+                      {appMode === 'analysis'
+                        ? activeAnalysisOpeningInfo.eco
+                        : activePlayOpeningInfo.eco}
+                    </span>
+                    <span className="text-white font-semibold truncate">
+                      {appMode === 'analysis'
+                        ? activeAnalysisOpeningInfo.name
+                        : activePlayOpeningInfo.name}
+                    </span>
+                  </div>
+                  {(appMode === 'analysis'
+                    ? activeAnalysisOpeningInfo.variation
+                    : activePlayOpeningInfo.variation) && (
+                    <span className="text-[10px] text-[#999] truncate max-w-[42%]">
+                      {appMode === 'analysis'
+                        ? activeAnalysisOpeningInfo.variation
+                        : activePlayOpeningInfo.variation}
+                    </span>
+                  )}
+                </div>
+
+                {/* Mobilde Yatay Kaydırılabilir Tıklanabilir Hamle Şeridi */}
+                <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-1 px-1 bg-[#1a1816] rounded border border-[#3c3934] text-xs font-mono">
+                  {(appMode === 'analysis' ? analysisMovePairs : movePairs)
+                    .length === 0 ? (
+                    <span className="text-[11px] text-[#777] font-sans px-1">
+                      Hamle yapıldığında burada tıklanabilir olarak listelenir...
+                    </span>
+                  ) : (
+                    (appMode === 'analysis' ? analysisMovePairs : movePairs).map(
+                      (pair) => (
+                        <div
+                          key={pair.moveNumber}
+                          className="flex items-center gap-0.5 shrink-0"
+                        >
+                          <span className="text-[#777] text-[11px] pl-1">
+                            {pair.moveNumber}.
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              appMode === 'analysis'
+                                ? jumpToAnalysisPly(pair.whitePly)
+                                : setViewingPly(
+                                    pair.whitePly === moveHistory.length
+                                      ? null
+                                      : pair.whitePly
+                                  )
+                            }
+                            className={`px-1.5 py-0.5 rounded text-xs ${
+                              (appMode === 'analysis'
+                                ? analysisPly
+                                : activePlayPly) === pair.whitePly
+                                ? 'bg-[#629924] text-white font-bold'
+                                : 'text-[#e0e0e0]'
+                            }`}
+                          >
+                            {pair.white.san}
+                          </button>
+                          {pair.black && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                appMode === 'analysis'
+                                  ? jumpToAnalysisPly(pair.blackPly)
+                                  : setViewingPly(
+                                      pair.blackPly === moveHistory.length
+                                        ? null
+                                        : pair.blackPly
+                                    )
+                              }
+                              className={`px-1.5 py-0.5 rounded text-xs ${
+                                (appMode === 'analysis'
+                                  ? analysisPly
+                                  : activePlayPly) === pair.blackPly
+                                  ? 'bg-[#629924] text-white font-bold'
+                                  : 'text-[#e0e0e0]'
+                              }`}
+                            >
+                              {pair.black.san}
+                            </button>
+                          )}
+                        </div>
+                      )
+                    )
+                  )}
+                </div>
+
+                {/* Mobilde Tek Dokunuşlu Hızlı Aksiyon Barı (Önceki, Sonraki, Çevir, Geri Al, Pes Et) */}
+                <div className="grid grid-cols-5 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      appMode === 'analysis'
+                        ? jumpToAnalysisPly(analysisPly - 1)
+                        : setViewingPly(Math.max(0, activePlayPly - 1))
+                    }
+                    disabled={
+                      (appMode === 'analysis' ? analysisPly : activePlayPly) === 0
+                    }
+                    className="py-2 rounded bg-[#302e2c] active:bg-[#3c3934] disabled:opacity-35 text-white flex items-center justify-center border border-[#3c3934]"
+                    title="Önceki Hamle"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (appMode === 'analysis') {
+                        jumpToAnalysisPly(analysisPly + 1);
+                      } else {
+                        const next = activePlayPly + 1;
+                        setViewingPly(
+                          next >= moveHistory.length ? null : next
+                        );
+                      }
+                    }}
+                    disabled={
+                      appMode === 'analysis'
+                        ? analysisPly >= analysisTimeline.length - 1
+                        : activePlayPly >= moveHistory.length
+                    }
+                    className="py-2 rounded bg-[#302e2c] active:bg-[#3c3934] disabled:opacity-35 text-white flex items-center justify-center border border-[#3c3934]"
+                    title="Sonraki Hamle"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setOrientation((prev) => (prev === 'w' ? 'b' : 'w'))
+                    }
+                    className="py-2 rounded bg-[#302e2c] active:bg-[#3c3934] text-white text-[11px] font-semibold flex items-center justify-center gap-1 border border-[#3c3934]"
+                  >
+                    <FlipHorizontal className="w-3.5 h-3.5" />
+                    <span>Çevir</span>
+                  </button>
+
+                  {appMode === 'play' ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleTakeback}
+                        disabled={
+                          moveHistory.length === 0 || gameOverState.isOver
+                        }
+                        className="py-2 rounded bg-[#302e2c] active:bg-[#3c3934] disabled:opacity-35 text-white text-[11px] font-semibold flex items-center justify-center gap-1 border border-[#3c3934]"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Geri Al</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleConfirmResign}
+                        disabled={
+                          gameOverState.isOver || moveHistory.length === 0
+                        }
+                        className="py-2 rounded bg-red-950/70 active:bg-red-900 disabled:opacity-35 text-red-200 text-[11px] font-semibold flex items-center justify-center gap-1 border border-red-800/50"
+                      >
+                        <Flag className="w-3.5 h-3.5" />
+                        <span>Pes Et</span>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setShowAnalysisArrows((v) => !v)}
+                        className={`py-2 rounded text-[11px] font-semibold flex items-center justify-center gap-1 border ${
+                          showAnalysisArrows
+                            ? 'bg-[#629924]/25 border-[#629924] text-[#8cd936]'
+                            : 'bg-[#302e2c] border-[#3c3934] text-[#999]'
+                        }`}
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Oklar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditorMatrix(parseFenToBoardMatrix(analysisFen));
+                          setIsBoardEditorOpen((v) => !v);
+                        }}
+                        className="py-2 rounded bg-[#3692e7] text-white text-[11px] font-bold flex items-center justify-center gap-1"
+                      >
+                        <Wrench className="w-3.5 h-3.5" />
+                        <span>Yapıcı</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* TAHTA YAPICI (BOARD EDITOR) TAŞ PALETİ */}
             {appMode === 'analysis' && isBoardEditorOpen && (

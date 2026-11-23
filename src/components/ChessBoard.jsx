@@ -142,11 +142,13 @@ export function ChessBoard({
       }
     };
 
-    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointermove', handlePointerMove, { passive: false });
     window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
     return () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
     };
   }, [dragState, orientation]);
 
@@ -244,7 +246,7 @@ export function ChessBoard({
       ref={boardRef}
       onContextMenu={(e) => e.preventDefault()}
       onPointerUp={handleBoardPointerUp}
-      className="relative aspect-square w-full max-w-[min(88vw,560px)] sm:max-w-[560px] lg:max-w-[600px] rounded-[3px] shadow-[0_8px_28px_rgba(0,0,0,0.65)] overflow-hidden select-none touch-none border border-[#3c3934]"
+      className="relative aspect-square w-full max-w-[min(94vw,560px)] sm:max-w-[560px] lg:max-w-[600px] rounded-[3px] shadow-[0_8px_28px_rgba(0,0,0,0.65)] overflow-hidden select-none touch-none border border-[#3c3934]"
     >
       {/* 8x8 Satranç Kareleri */}
       <div className="grid grid-cols-8 grid-rows-8 w-full h-full">
@@ -456,10 +458,10 @@ export function ChessBoard({
         </svg>
       )}
 
-      {/* Sürüklenen Taşın Hayaleti */}
+      {/* Sürüklenen Taşın Hayaleti (Mobilde parmak altında kalmaması için hafif yukarı/büyük gösterim) */}
       {dragState && dragState.hasMoved && (
         <div
-          className="pointer-events-none absolute z-40 w-[12.5%] h-[12.5%] -translate-x-1/2 -translate-y-1/2 scale-110"
+          className="pointer-events-none absolute z-40 w-[13.5%] h-[13.5%] sm:w-[12.5%] sm:h-[12.5%] -translate-x-1/2 -translate-y-[65%] sm:-translate-y-1/2 scale-115 sm:scale-110"
           style={{
             left: `${dragState.x}px`,
             top: `${dragState.y}px`,
