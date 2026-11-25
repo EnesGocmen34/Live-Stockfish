@@ -75,6 +75,8 @@ export function ChessBoard({
   onCompletePromotion,
   onCancelPromotion,
   disabled = false,
+  premove = null,
+  onCancelPremove = null,
 }) {
   const theme = BOARD_THEMES[themeKey] || BOARD_THEMES.brown;
   const boardRef = useRef(null);
@@ -153,9 +155,13 @@ export function ChessBoard({
   }, [dragState, orientation]);
 
   const handleSquarePointerDown = (e, square, piece) => {
-    // Sağ tık ile Lichess tarzı özel ok çizimi başlatma
+    // Sağ tık ile Lichess tarzı özel ok çizimi veya premove iptali
     if (e.button === 2) {
       e.preventDefault();
+      if (premove && onCancelPremove) {
+        onCancelPremove();
+        return;
+      }
       setRightDragStart(square);
       return;
     }
@@ -240,6 +246,14 @@ export function ChessBoard({
 
   const promoPos = getPromotionPosition();
   const combinedArrows = [...arrows, ...userArrows];
+  if (premove && premove.from && premove.to) {
+    combinedArrows.push({
+      from: premove.from,
+      to: premove.to,
+      color: '#e05353',
+      opacity: 0.9,
+    });
+  }
 
   return (
     <div
@@ -259,6 +273,10 @@ export function ChessBoard({
             const piece = board[rankNum][fileNum];
 
             const isSelected = selectedSquare === square && !editorMode;
+            const isPremove =
+              !editorMode &&
+              premove &&
+              (premove.from === square || premove.to === square);
             const isLastMove =
               !editorMode &&
               lastMove &&
@@ -306,6 +324,13 @@ export function ChessBoard({
 
                 {isKingInCheck && (
                   <div className="absolute inset-0 pointer-events-none lichess-check-glow animate-pulse" />
+                )}
+
+                {isPremove && (
+                  <div
+                    className="absolute inset-0 pointer-events-none z-20 border-2 border-red-500"
+                    style={{ backgroundColor: 'rgba(224, 83, 83, 0.40)' }}
+                  />
                 )}
 
                 {/* Koordinat Etiketleri */}

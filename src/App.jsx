@@ -39,6 +39,9 @@ import {
   LogIn,
   LogOut,
   UserPlus,
+  Zap,
+  Share2,
+  X,
 } from 'lucide-react';
 import ChessBoard, { BOARD_THEMES } from './components/ChessBoard.jsx';
 import ChessPiece from './components/ChessPieces.jsx';
@@ -358,6 +361,55 @@ export default function App() {
   const [copiedType, setCopiedType] = useState(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
 
+  // --- CHESS.COM TARZI PREMOVE (ÖN HAMLE) SİSTEMİ & AYARI ---
+  const [premove, setPremove] = useState(null); // { from, to }
+  const [premoveFrom, setPremoveFrom] = useState(null); // string | null ('e7' vb.)
+  const premoveRef = useRef(null);
+  const [premoveEnabled, setPremoveEnabled] = useState(() => {
+    try {
+      const saved = localStorage.getItem('chess_premove_enabled');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const togglePremove = () => {
+    setPremoveEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('chess_premove_enabled', JSON.stringify(next));
+      } catch {}
+      if (!next) {
+        setPremove(null);
+        premoveRef.current = null;
+        setPremoveFrom(null);
+      }
+      return next;
+    });
+  };
+
+  // --- LICHESS TARZI /game/:id PAYLAŞMA & YÜKLEME SİSTEMİ ---
+  const [sharedGameBanner, setSharedGameBanner] = useState(null);
+  const [copiedShareUrl, setCopiedShareUrl] = useState(false);
+
+  // URL'de /game/:id varsa ilgili maçı sunucudan yükle
+  useEffect(() => {
+    const pathname = window.location.pathname;
+    const match = pathname.match(/\/game\/([a-zA-Z0-9_-]+)/);
+    if (match && match[1]) {
+      const gid = match[1];
+      fetch(`/api/games/${gid}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.ok && data.game) {
+            loadGameRecordIntoAnalysis(data.game);
+          }
+        })
+        .catch((err) => console.error('Failed to load shared game from URL:', err));
+    }
+  }, []);
+
   // Stockfish Web Worker Başlatma
   useEffect(() => {
     const controller = new StockfishController();
@@ -551,6 +603,17 @@ export default function App() {
         if (moveRes.captured) soundEngine.playCapture();
         else if (g.inCheck()) soundEngine.playCheck();
         else soundEngine.playMove();
+
+        // CHESS.COM & LICHESS TARZI PREMOVE OTOMATİK UYGULAMA (0 MS GECİKME)
+        if (premoveRef.current) {
+          const pm = premoveRef.current;
+          setPremove(null);
+          premoveRef.current = null;
+          setPremoveFrom(null);
+          setTimeout(() => {
+            attemptOnlineMove(pm.from, pm.to);
+          }, 15);
+        }
       }
     });
     const unbindDrawOffered = multiplayerClient.on('draw_offered', () => {
@@ -564,6 +627,12 @@ export default function App() {
     });
     const unbindGameOver = multiplayerClient.on('game_over', (data) => {
       setOnlineGameOverData(data);
+      setPremove(null);
+      premoveRef.current = null;
+      setPremoveFrom(null);
+      if (data.gameId) {
+        window.history.pushState(null, '', '/game/' + data.gameId);
+      }
       if (data.winner === onlineActiveGame?.myColor) {
         soundEngine.playVictory();
       } else if (data.winner === 'draw') {
@@ -613,7 +682,7 @@ export default function App() {
       const g = onlineGameRef.current;
       if (g.turn() !== onlineActiveGame.myColor) return false;
 
-      // Terfi kontrolü
+      // Terfi kontrolü (Premove ise zaman kaybetmemek için vezir otomatik seçilir)
       const piece = g.get(from);
       if (
         piece &&
@@ -622,8 +691,12 @@ export default function App() {
           (piece.color === 'b' && to[1] === '1')) &&
         !promotion
       ) {
-        setOnlinePendingPromo({ from, to, color: piece.color });
-        return true;
+        if (premoveRef.current) {
+          promotion = 'q';
+        } else {
+          setOnlinePendingPromo({ from, to, color: piece.color });
+          return true;
+        }
       }
 
       try {
@@ -939,6 +1012,17 @@ export default function App() {
             setSelectedSquare(null);
             setIsBotThinking(false);
             triggerSoundForMove(moveObj, gameRef.current);
+
+            // PREMOVE TETİKLEMESİ (BOT MAÇI)
+            if (premoveRef.current) {
+              const pm = premoveRef.current;
+              setPremove(null);
+              premoveRef.current = null;
+              setPremoveFrom(null);
+              setTimeout(() => {
+                attemptPlayerMove(pm.from, pm.to);
+              }, 20);
+            }
           } else {
             setIsBotThinking(false);
           }
@@ -1002,12 +1086,16 @@ export default function App() {
 
     const isPromotion = matchingMoves.some((m) => m.flags.includes('p'));
     if (isPromotion && !explicitPromotion) {
-      setPendingPromotion({
-        from: fromSquare,
-        to: actualTarget,
-        color: playerColor,
-      });
-      return true;
+      if (premoveRef.current) {
+        explicitPromotion = 'q';
+      } else {
+        setPendingPromotion({
+          from: fromSquare,
+          to: actualTarget,
+          color: playerColor,
+        });
+        return true;
+      }
     }
 
     try {
@@ -1217,6 +1305,187 @@ export default function App() {
     setTimeout(() => {
       runFullGameAccuracyReview(fens, history);
     }, 80);
+  };
+
+  // Lichess tarzı /game/:id kaydı üzerinden maçı Analiz Stüdyosuna tam olarak yükleme
+  const loadGameRecordIntoAnalysis = useCallback((gameRecord) => {
+    if (!gameRecord) return;
+    try {
+      const g = new Chess();
+      const movesTimeline = [STARTING_FEN];
+      const moveHistoryList = [];
+
+      if (Array.isArray(gameRecord.moves)) {
+        for (const m of gameRecord.moves) {
+          try {
+            const res = g.move({ from: m.from, to: m.to, promotion: m.promotion || 'q' });
+            if (res) {
+              movesTimeline.push(g.fen());
+              moveHistoryList.push(res);
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      analysisGameRef.current = g;
+      setAnalysisFen(movesTimeline[movesTimeline.length - 1] || STARTING_FEN);
+      setAnalysisTimeline(movesTimeline);
+      setAnalysisHistory(moveHistoryList);
+      setAnalysisPly(movesTimeline.length - 1);
+      setAnalysisSelectedSq(null);
+      setIsBoardEditorOpen(false);
+
+      const whiteName = gameRecord.white?.username || 'Beyaz';
+      const blackName = gameRecord.black?.username || 'Siyah';
+      const whiteRating = gameRecord.white?.rating || '?';
+      const blackRating = gameRecord.black?.rating || '?';
+      const resStr =
+        gameRecord.winner === 'w'
+          ? '1-0'
+          : gameRecord.winner === 'b'
+          ? '0-1'
+          : '1/2-1/2';
+
+      setImportedGameMeta({
+        event: `Online Match #${gameRecord.id}`,
+        site: 'live-stockfishh.onrender.com',
+        date: gameRecord.date ? gameRecord.date.split('T')[0] : '2026.11.25',
+        white: whiteName,
+        whiteElo: whiteRating,
+        black: blackName,
+        blackElo: blackRating,
+        result: resStr,
+        termination: gameRecord.reason,
+      });
+
+      setSharedGameBanner({
+        id: gameRecord.id,
+        white: whiteName,
+        black: blackName,
+        result: resStr,
+      });
+
+      setAppMode('analysis');
+      soundEngine.playGameStart();
+    } catch (err) {
+      console.error('Failed to load game record into analysis:', err);
+    }
+  }, []);
+
+  // Aktif Maçı Sunucuya Kaydedip Lichess Tarzı Paylaşım Linki Al (/game/:id)
+  const handleShareCurrentGame = async () => {
+    try {
+      let whiteObj = { username: 'Beyaz', rating: '?' };
+      let blackObj = { username: 'Siyah', rating: '?' };
+      let winner = 'draw';
+      let reason = 'Kayıt';
+      let moves = [];
+      let fen = STARTING_FEN;
+      let pgn = '';
+
+      if (appMode === 'online' && onlineActiveGame) {
+        whiteObj = {
+          username:
+            onlineActiveGame.myColor === 'w'
+              ? onlineUserProfile.username
+              : onlineActiveGame.opponent?.username,
+          rating:
+            onlineActiveGame.myColor === 'w'
+              ? onlineUserProfile.ratings?.[onlineActiveGame.category] || 1500
+              : onlineActiveGame.opponent?.rating,
+        };
+        blackObj = {
+          username:
+            onlineActiveGame.myColor === 'b'
+              ? onlineUserProfile.username
+              : onlineActiveGame.opponent?.username,
+          rating:
+            onlineActiveGame.myColor === 'b'
+              ? onlineUserProfile.ratings?.[onlineActiveGame.category] || 1500
+              : onlineActiveGame.opponent?.rating,
+        };
+        moves = onlineGameRef.current.history({ verbose: true });
+        fen = onlineFen;
+        pgn = onlineGameRef.current.pgn();
+        if (onlineGameOverData) {
+          winner = onlineGameOverData.winner;
+          reason = onlineGameOverData.reason;
+        }
+      } else if (appMode === 'analysis') {
+        whiteObj = {
+          username: importedGameMeta?.white || 'Beyaz',
+          rating: importedGameMeta?.whiteElo || '?',
+        };
+        blackObj = {
+          username: importedGameMeta?.black || 'Siyah',
+          rating: importedGameMeta?.blackElo || '?',
+        };
+        moves = analysisGameRef.current.history({ verbose: true });
+        fen = analysisFen;
+        pgn = analysisGameRef.current.pgn();
+        reason = importedGameMeta?.termination || 'Analiz';
+      } else {
+        whiteObj = {
+          username:
+            playerColor === 'w'
+              ? onlineUserProfile.username
+              : `Stockfish (${botElo})`,
+          rating:
+            playerColor === 'w'
+              ? onlineUserProfile.ratings?.blitz || 1500
+              : botElo,
+        };
+        blackObj = {
+          username:
+            playerColor === 'b'
+              ? onlineUserProfile.username
+              : `Stockfish (${botElo})`,
+          rating:
+            playerColor === 'b'
+              ? onlineUserProfile.ratings?.blitz || 1500
+              : botElo,
+        };
+        moves = game.history({ verbose: true });
+        fen = displayedPlayFen;
+        pgn = game.pgn();
+        if (gameOverState.isOver) {
+          winner = gameOverState.winner;
+          reason = gameOverState.reason;
+        }
+      }
+
+      const res = await fetch('/api/games/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          white: whiteObj,
+          black: blackObj,
+          winner,
+          reason,
+          moves,
+          fen,
+          pgn,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok && data.id) {
+        const fullUrl = `${window.location.origin}/game/${data.id}`;
+        window.history.pushState(null, '', `/game/${data.id}`);
+        await navigator.clipboard.writeText(fullUrl);
+        setCopiedShareUrl(true);
+        setSharedGameBanner({
+          id: data.id,
+          white: whiteObj.username,
+          black: blackObj.username,
+          result: winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2',
+        });
+        setTimeout(() => setCopiedShareUrl(false), 3000);
+      }
+    } catch (err) {
+      console.error('Failed to save & share game:', err);
+    }
   };
 
   // Maçı Analiz Stüdyosuna Aktar
@@ -2130,6 +2399,20 @@ export default function App() {
 
             {/* Mobil Sağ Üst Hızlı Butonlar */}
             <div className="flex sm:hidden items-center gap-1.5">
+              {/* Mobil Premove Toggle */}
+              <button
+                type="button"
+                onClick={togglePremove}
+                className={`p-1.5 rounded border text-[11px] font-bold transition-colors ${
+                  premoveEnabled
+                    ? 'bg-amber-500/20 border-amber-500 text-amber-400'
+                    : 'bg-[#262421] border-[#3c3934] text-[#888]'
+                }`}
+                title="Premove (Ön Hamle) Ayarı: Sıra rakipteyken önceden hamle hazırla"
+              >
+                <Zap className={`w-3.5 h-3.5 ${premoveEnabled ? 'fill-current' : ''}`} />
+              </button>
+
               {onlineUserProfile?.isRegistered ? (
                 <button
                   type="button"
@@ -2318,6 +2601,22 @@ export default function App() {
               </button>
             )}
 
+            {/* PC Premove (Ön Hamle) Ayarı */}
+            <button
+              type="button"
+              onClick={togglePremove}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-semibold border transition-colors ${
+                premoveEnabled
+                  ? 'bg-amber-500/15 border-amber-500 text-amber-300'
+                  : 'bg-[#262421] border-[#3c3934] text-[#888] hover:text-white'
+              }`}
+              title="Premove (Ön Hamle) Ayarı: Sıra rakipteyken önceden hamle hazırla. Sıra size geçtiğinde 0 ms gecikmeyle anında uygulanır."
+            >
+              <Zap className={`w-3.5 h-3.5 ${premoveEnabled ? 'text-amber-400 fill-current' : 'text-[#888]'}`} />
+              <span className="hidden md:inline">Premove:</span>
+              <span>{premoveEnabled ? 'Açık' : 'Kapalı'}</span>
+            </button>
+
             {/* Ses Aç/Kapa */}
             <button
               type="button"
@@ -2489,6 +2788,62 @@ export default function App() {
                   </div>
                 )}
 
+                {/* Lichess Tarzı Paylaşılan Maç İnceleme Banner'ı */}
+                {sharedGameBanner && (
+                  <div className="w-full bg-[#1e293b] border border-[#3b82f6] rounded-md px-3.5 py-2 mb-2 flex items-center justify-between text-xs text-white shadow-lg animate-fade-in">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
+                      <span>
+                        İncelenen Maç: <strong>{sharedGameBanner.white}</strong> vs <strong>{sharedGameBanner.black}</strong> ({sharedGameBanner.result})
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const fullUrl = `${window.location.origin}/game/${sharedGameBanner.id}`;
+                          navigator.clipboard.writeText(fullUrl);
+                          setCopiedShareUrl(true);
+                          setTimeout(() => setCopiedShareUrl(false), 2500);
+                        }}
+                        className="px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white font-bold text-[11px] flex items-center gap-1 cursor-pointer transition-colors"
+                      >
+                        <Share2 className="w-3 h-3" /> {copiedShareUrl ? 'Kopyalandı!' : 'Linki Paylaş'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSharedGameBanner(null)}
+                        className="text-[#94a3b8] hover:text-white p-0.5 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Chess.com Tarzı Aktif Premove Bildirimi */}
+                {premove && (
+                  <div className="w-full bg-red-950/70 border border-red-500 text-red-200 text-xs px-3 py-1.5 rounded flex items-center justify-between mb-1.5 shadow">
+                    <div className="flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-red-400 fill-current animate-pulse" />
+                      <span>
+                        Premove Hazır: <strong className="font-mono text-white">{premove.from} → {premove.to}</strong> (Sıra sende olunca 0 ms ile oynanacak)
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPremove(null);
+                        premoveRef.current = null;
+                        setPremoveFrom(null);
+                      }}
+                      className="text-[11px] bg-red-800/80 hover:bg-red-700 text-white px-2 py-0.5 rounded font-bold cursor-pointer"
+                    >
+                      İptal
+                    </button>
+                  </div>
+                )}
+
                 <ChessBoard
                   board={activeBoardMatrix}
                   orientation={
@@ -2499,14 +2854,24 @@ export default function App() {
                   themeKey={boardTheme}
                   selectedSquare={
                     appMode === 'online'
-                      ? onlineSelectedSq
+                      ? (onlineGameRef.current.turn() === onlineActiveGame?.myColor
+                          ? onlineSelectedSq
+                          : premoveFrom)
                       : appMode === 'analysis'
                       ? analysisSelectedSq
-                      : selectedSquare
+                      : (game.turn() === playerColor && !isBotThinking
+                          ? selectedSquare
+                          : premoveFrom)
                   }
                   legalMovesForSelected={activeLegalMoves}
                   lastMove={displayedLastMove}
                   kingInCheckSquare={displayedKingInCheckSquare}
+                  premove={premove}
+                  onCancelPremove={() => {
+                    setPremove(null);
+                    premoveRef.current = null;
+                    setPremoveFrom(null);
+                  }}
                   pendingPromotion={
                     appMode === 'online'
                       ? onlinePendingPromo
@@ -2521,24 +2886,50 @@ export default function App() {
                   onSquareClick={(sq) => {
                     if (appMode === 'online') {
                       if (onlineGameOverData) return;
-                      if (onlineGameRef.current.turn() !== onlineActiveGame?.myColor)
-                        return;
-                      if (onlineSelectedSq) {
-                        if (onlineSelectedSq === sq) {
-                          setOnlineSelectedSq(null);
-                          return;
+                      const isMyTurn = onlineGameRef.current.turn() === onlineActiveGame?.myColor;
+                      if (isMyTurn) {
+                        if (premove) { setPremove(null); premoveRef.current = null; }
+                        if (onlineSelectedSq) {
+                          if (onlineSelectedSq === sq) {
+                            setOnlineSelectedSq(null);
+                            return;
+                          }
+                          const moved = attemptOnlineMove(onlineSelectedSq, sq);
+                          if (moved) return;
                         }
-                        const moved = attemptOnlineMove(onlineSelectedSq, sq);
-                        if (moved) return;
-                      }
-                      const clicked = onlineGameRef.current.get(sq);
-                      if (
-                        clicked &&
-                        clicked.color === onlineActiveGame?.myColor
-                      ) {
-                        setOnlineSelectedSq(sq);
+                        const clicked = onlineGameRef.current.get(sq);
+                        if (
+                          clicked &&
+                          clicked.color === onlineActiveGame?.myColor
+                        ) {
+                          setOnlineSelectedSq(sq);
+                        } else {
+                          setOnlineSelectedSq(null);
+                        }
                       } else {
-                        setOnlineSelectedSq(null);
+                        // Online Premove
+                        if (!premoveEnabled) return;
+                        const clicked = onlineGameRef.current.get(sq);
+                        if (premoveFrom) {
+                          if (premoveFrom === sq) {
+                            setPremoveFrom(null);
+                            return;
+                          }
+                          if (clicked && clicked.color === onlineActiveGame?.myColor) {
+                            setPremoveFrom(sq);
+                            return;
+                          }
+                          const newPm = { from: premoveFrom, to: sq };
+                          setPremove(newPm);
+                          premoveRef.current = newPm;
+                          setPremoveFrom(null);
+                        } else {
+                          if (clicked && clicked.color === onlineActiveGame?.myColor) {
+                            setPremoveFrom(sq);
+                            setPremove(null);
+                            premoveRef.current = null;
+                          }
+                        }
                       }
                       return;
                     }
@@ -2559,43 +2950,87 @@ export default function App() {
                         setAnalysisSelectedSq(null);
                       }
                     } else {
-                      if (gameOverState.isOver || isBotThinking) return;
-                      if (isViewingPastMove) {
-                        setViewingPly(null);
-                        return;
-                      }
-                      if (game.turn() !== playerColor) return;
-                      if (selectedSquare) {
-                        if (selectedSquare === sq) {
-                          setSelectedSquare(null);
-                          return;
+                      if (gameOverState.isOver || isViewingPastMove) return;
+                      const isMyTurn = game.turn() === playerColor && !isBotThinking;
+                      if (isMyTurn) {
+                        if (premove) { setPremove(null); premoveRef.current = null; }
+                        if (selectedSquare) {
+                          if (selectedSquare === sq) {
+                            setSelectedSquare(null);
+                            return;
+                          }
+                          const moved = attemptPlayerMove(selectedSquare, sq);
+                          if (moved) return;
                         }
-                        const moved = attemptPlayerMove(selectedSquare, sq);
-                        if (moved) return;
-                      }
-                      const clickedPiece = game.get(sq);
-                      if (clickedPiece && clickedPiece.color === playerColor) {
-                        setSelectedSquare(sq);
+                        const clickedPiece = game.get(sq);
+                        if (clickedPiece && clickedPiece.color === playerColor) {
+                          setSelectedSquare(sq);
+                        } else {
+                          setSelectedSquare(null);
+                        }
                       } else {
-                        setSelectedSquare(null);
+                        // Bot Maçı Premove
+                        if (!premoveEnabled) return;
+                        const clickedPiece = game.get(sq);
+                        if (premoveFrom) {
+                          if (premoveFrom === sq) {
+                            setPremoveFrom(null);
+                            return;
+                          }
+                          if (clickedPiece && clickedPiece.color === playerColor) {
+                            setPremoveFrom(sq);
+                            return;
+                          }
+                          const newPm = { from: premoveFrom, to: sq };
+                          setPremove(newPm);
+                          premoveRef.current = newPm;
+                          setPremoveFrom(null);
+                        } else {
+                          if (clickedPiece && clickedPiece.color === playerColor) {
+                            setPremoveFrom(sq);
+                            setPremove(null);
+                            premoveRef.current = null;
+                          }
+                        }
                       }
                     }
                   }}
                   onPieceDrop={(fromSq, toSq) => {
                     if (appMode === 'online') {
                       if (onlineGameOverData) return;
-                      if (onlineGameRef.current.turn() !== onlineActiveGame?.myColor)
-                        return;
-                      attemptOnlineMove(fromSq, toSq);
+                      const isMyTurn = onlineGameRef.current.turn() === onlineActiveGame?.myColor;
+                      if (isMyTurn) {
+                        attemptOnlineMove(fromSq, toSq);
+                      } else {
+                        if (!premoveEnabled) return;
+                        const piece = onlineGameRef.current.get(fromSq);
+                        if (piece && piece.color === onlineActiveGame?.myColor && fromSq !== toSq) {
+                          const newPm = { from: fromSq, to: toSq };
+                          setPremove(newPm);
+                          premoveRef.current = newPm;
+                          setPremoveFrom(null);
+                        }
+                      }
                       return;
                     }
                     if (appMode === 'analysis') {
                       if (isBoardEditorOpen) return;
                       attemptAnalysisMove(fromSq, toSq);
                     } else {
-                      if (gameOverState.isOver || isBotThinking || isViewingPastMove)
-                        return;
-                      attemptPlayerMove(fromSq, toSq);
+                      if (gameOverState.isOver || isViewingPastMove) return;
+                      const isMyTurn = game.turn() === playerColor && !isBotThinking;
+                      if (isMyTurn) {
+                        attemptPlayerMove(fromSq, toSq);
+                      } else {
+                        if (!premoveEnabled) return;
+                        const piece = game.get(fromSq);
+                        if (piece && piece.color === playerColor && fromSq !== toSq) {
+                          const newPm = { from: fromSq, to: toSq };
+                          setPremove(newPm);
+                          premoveRef.current = newPm;
+                          setPremoveFrom(null);
+                        }
+                      }
                     }
                   }}
                   onCompletePromotion={(pieceType) => {
@@ -2626,11 +3061,12 @@ export default function App() {
                   }}
                   disabled={
                     (appMode === 'play' &&
-                      (gameOverState.isOver || isViewingPastMove)) ||
+                      (gameOverState.isOver || isViewingPastMove || (!premoveEnabled && isBotThinking))) ||
                     (appMode === 'online' &&
                       (!!onlineGameOverData ||
-                        onlineGameRef.current.turn() !==
-                          onlineActiveGame?.myColor))
+                        (!premoveEnabled &&
+                          onlineGameRef.current.turn() !==
+                            onlineActiveGame?.myColor)))
                   }
                 />
 
@@ -2714,6 +3150,22 @@ export default function App() {
                       )}
 
                       <div className="flex flex-col gap-2 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const gid = onlineGameOverData?.gameId || onlineActiveGame?.gameId;
+                            if (gid) {
+                              const shareUrl = `${window.location.origin}/game/${gid}`;
+                              navigator.clipboard.writeText(shareUrl);
+                              setCopiedShareUrl(true);
+                              setTimeout(() => setCopiedShareUrl(false), 2500);
+                            }
+                          }}
+                          className="w-full py-2 px-3 rounded bg-[#1e293b] hover:bg-[#28384e] border border-[#3b82f6]/60 text-blue-300 text-xs font-bold shadow flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                        >
+                          <Share2 className="w-3.5 h-3.5" />
+                          {copiedShareUrl ? '✓ Maç Linki Kopyalandı!' : `🔗 Maç Linkini Paylaş (/game/${onlineGameOverData?.gameId || onlineActiveGame?.gameId || ''})`}
+                        </button>
                         <button
                           type="button"
                           onClick={reviewOnlineGameWithStockfish}
@@ -3159,6 +3611,20 @@ export default function App() {
                 >
                   <MessageSquare className="w-3.5 h-3.5" />
                   <span>Sohbet</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const fullUrl = `${window.location.origin}/game/${onlineActiveGame.gameId}`;
+                    navigator.clipboard.writeText(fullUrl);
+                    setCopiedShareUrl(true);
+                    setTimeout(() => setCopiedShareUrl(false), 2500);
+                  }}
+                  className="col-span-3 bg-[#1e293b] hover:bg-[#28384e] border border-[#3b82f6]/50 text-blue-300 py-1.5 rounded text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>{copiedShareUrl ? '✓ Maç Linki Kopyalandı!' : `🔗 Maç Linkini Paylaş (/game/${onlineActiveGame.gameId})`}</span>
                 </button>
               </div>
 
@@ -4071,6 +4537,24 @@ export default function App() {
                         <>
                           <Copy className="w-3.5 h-3.5" />
                           <span>FEN Kopyala</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleShareCurrentGame}
+                      className="col-span-2 flex items-center justify-center gap-1.5 px-2.5 py-2 rounded bg-[#1e293b] hover:bg-[#28384e] border border-[#3b82f6]/50 text-xs text-blue-300 font-semibold transition-colors mt-1 cursor-pointer"
+                    >
+                      {copiedShareUrl ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-blue-400" />
+                          <span className="text-blue-300 font-bold">Maç Linki Kopyalandı!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Share2 className="w-3.5 h-3.5" />
+                          <span>🔗 Maçı Paylaş / Kalıcı Link Al (/game/:id)</span>
                         </>
                       )}
                     </button>

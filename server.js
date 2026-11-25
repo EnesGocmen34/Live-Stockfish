@@ -14,9 +14,10 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// --- KALICI KULLANICI VERİTABANI (DATA/USERS.JSON) ---
+// --- KALICI KULLANICI & MAÇ VERİTABANI (DATA/USERS.JSON & DATA/GAMES.JSON) ---
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const GAMES_FILE = path.join(DATA_DIR, 'games.json');
 
 function loadUsersFromDisk() {
   try {
@@ -44,6 +45,51 @@ function saveUsersToDisk() {
   } catch (err) {
     console.error('Failed to save users to disk:', err);
   }
+}
+
+function loadGamesFromDisk() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(GAMES_FILE)) {
+      const raw = fs.readFileSync(GAMES_FILE, 'utf8');
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    console.error('Failed to load games from disk:', err);
+  }
+  return {};
+}
+
+const gamesStore = loadGamesFromDisk();
+
+function saveGamesToDisk() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    // Render Free Tier RAM/Disk optimizasyonu: En son 1000 maçı sakla
+    const keys = Object.keys(gamesStore);
+    if (keys.length > 1000) {
+      const overflow = keys.length - 1000;
+      for (let i = 0; i < overflow; i++) {
+        delete gamesStore[keys[i]];
+      }
+    }
+    fs.writeFileSync(GAMES_FILE, JSON.stringify(gamesStore, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to save games to disk:', err);
+  }
+}
+
+function generateGameId() {
+  const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let id = '';
+  for (let i = 0; i < 8; i++) {
+    id += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return id;
 }
 
 const sessions = new Map(); // token -> userId
@@ -207,6 +253,68 @@ app.post('/api/auth/logout', (req, res) => {
   return res.json({ ok: true });
 });
 
+// --- MAÇ GEÇMİŞİ & LICHESS TARZI /game/:id API'LARI ---
+app.get('/api/games/:id', (req, res) => {
+  const { id } = req.params;
+  const saved = gamesStore[id];
+  if (saved) {
+    return res.json({ ok: true, game: saved });
+  }
+
+  const active = activeGames.get(id);
+  if (active) {
+    return res.json({
+      ok: true,
+      game: {
+        id: active.id,
+        status: active.status,
+        white: { username: active.white.user.username, rating: active.white.rating },
+        black: { username: active.black.user.username, rating: active.black.rating },
+        moves: active.moves,
+        fen: active.fen,
+        turn: active.turn,
+        category: active.category,
+        timeMinutes: active.timeMinutes,
+        incSeconds: active.incSeconds,
+        rated: active.rated,
+      }
+    });
+  }
+
+  return res.status(404).json({ ok: false, error: 'Maç bulunamadı.' });
+});
+
+// Herhangi bir maçı (Bot, Analiz veya Canlı) kalıcı URL almak için kaydet
+app.post('/api/games/save', (req, res) => {
+  try {
+    const { white, black, winner, reason, moves, fen, pgn, category, timeControl } = req.body || {};
+    const gameId = generateGameId();
+    const newRecord = {
+      id: gameId,
+      date: new Date().toISOString(),
+      white: white || { username: 'Beyaz', rating: '?' },
+      black: black || { username: 'Siyah', rating: '?' },
+      winner: winner || 'draw',
+      reason: reason || 'Kayıt',
+      moves: moves || [],
+      finalFen: fen || '',
+      pgn: pgn || '',
+      category: category || 'standard',
+      timeControl: timeControl || 'Standart',
+    };
+    gamesStore[gameId] = newRecord;
+    saveGamesToDisk();
+    return res.json({ ok: true, id: gameId, url: `/game/${gameId}` });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Lichess tarzı doğrudan /game/:id linkiyle tarayıcıdan girildiğinde index.html ver
+app.get('/game/:id', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
@@ -301,7 +409,7 @@ function generateRoomCode() {
 }
 
 function createGame({ playerW, playerB, timeMinutes, incSeconds, rated, challengeId = null }) {
-  const gameId = 'game_' + Math.random().toString(36).substring(2, 10);
+  const gameId = generateGameId();
   const code = generateRoomCode();
   const category = getEloCategory(timeMinutes, incSeconds);
   const timeMs = timeMinutes * 60 * 1000;
@@ -433,9 +541,41 @@ function endGame(gameId, winner, reason) {
     saveUsersToDisk();
   }
 
+  // KALICI MAÇ GEÇMİŞİ KAYDI (Lichess tarzı /game/:id)
+  try {
+    const savedGame = {
+      id: gameId,
+      date: new Date().toISOString(),
+      white: {
+        id: game.white.user.id,
+        username: game.white.user.username,
+        rating: game.white.rating
+      },
+      black: {
+        id: game.black.user.id,
+        username: game.black.user.username,
+        rating: game.black.rating
+      },
+      winner,
+      reason,
+      moves: game.moves || [],
+      finalFen: game.fen,
+      category: game.category,
+      timeMinutes: game.timeMinutes,
+      incSeconds: game.incSeconds,
+      rated: game.rated,
+      ratingChanges: eloChanges
+    };
+    gamesStore[gameId] = savedGame;
+    saveGamesToDisk();
+  } catch (err) {
+    console.error('Failed to save game record:', err);
+  }
+
   const payload = {
     type: 'GAME_OVER',
     gameId,
+    gameUrl: `/game/${gameId}`,
     winner, // 'w', 'b', 'draw'
     reason, // 'checkmate', 'timeout', 'resignation', 'draw_agreement', 'abandoned'
     ratingChanges: eloChanges,
