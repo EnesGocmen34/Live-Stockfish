@@ -31,11 +31,20 @@ import {
   Lock,
   BarChart3,
   Settings,
+  Users,
+  MessageSquare,
+  Send,
 } from 'lucide-react';
 import ChessBoard, { BOARD_THEMES } from './components/ChessBoard.jsx';
 import ChessPiece from './components/ChessPieces.jsx';
 import EvalBar from './components/EvalBar.jsx';
 import AccountScout from './components/AccountScout.jsx';
+import MultiplayerLobby from './components/MultiplayerLobby.jsx';
+import {
+  multiplayerClient,
+  loadUserProfile,
+  saveUserProfile,
+} from './utils/multiplayerClient.js';
 import { parseGameMovesAndTimeline } from './utils/accountAnalyzer.js';
 import { soundEngine } from './utils/soundEngine.js';
 import {
@@ -309,6 +318,34 @@ export default function App() {
   const [muted, setMuted] = useState(false);
   const [resignWinner, setResignWinner] = useState(null);
   const [showResignConfirm, setShowResignConfirm] = useState(false);
+
+  // Lichess Tarzı İnteraktif Hata İnceleme (Review Mistakes)
+  const [mistakeReview, setMistakeReview] = useState(null); // { color: 'w'|'b', errors: [], currentIndex: 0 }
+
+  // --- 3. CANLI MULTIPLAYER (ONLINE LOBİ & MAÇ) STATE'LERİ ---
+  const onlineGameRef = useRef(new Chess());
+  const [onlineFen, setOnlineFen] = useState(STARTING_FEN);
+  const [onlineTimeline, setOnlineTimeline] = useState([STARTING_FEN]);
+  const [onlineMoveHistory, setOnlineMoveHistory] = useState([]);
+  const [onlineSelectedSq, setOnlineSelectedSq] = useState(null);
+  const [onlinePendingPromo, setOnlinePendingPromo] = useState(null);
+  const [onlineActiveGame, setOnlineActiveGame] = useState(null);
+  const [onlineWaitingQueue, setOnlineWaitingQueue] = useState(null);
+  const [onlineMyChallenge, setOnlineMyChallenge] = useState(null);
+  const [onlineLobbyState, setOnlineLobbyState] = useState({
+    onlineCount: 1,
+    openChallenges: [],
+    activeGameCount: 0,
+  });
+  const [onlineUserProfile, setOnlineUserProfile] = useState(() => loadUserProfile());
+  const [onlineIsConnected, setOnlineIsConnected] = useState(false);
+  const [onlineTimeWhiteMs, setOnlineTimeWhiteMs] = useState(180000);
+  const [onlineTimeBlackMs, setOnlineTimeBlackMs] = useState(180000);
+  const [onlineDrawOffered, setOnlineDrawOffered] = useState(false);
+  const [onlineGameOverData, setOnlineGameOverData] = useState(null);
+  const [onlineChatMessages, setOnlineChatMessages] = useState([]);
+  const [onlineChatInput, setOnlineChatInput] = useState('');
+  const [showOnlineChat, setShowOnlineChat] = useState(false);
   const [showNewGameModal, setShowNewGameModal] = useState(false);
   const [dismissGameOverModal, setDismissGameOverModal] = useState(false);
   const [copiedType, setCopiedType] = useState(null);
@@ -426,6 +463,230 @@ export default function App() {
     [playerColor]
   );
 
+  // --- LICHESS STİLİ HATA İNCELEME MODU (REVIEW MISTAKES) ---
+  const startMistakeReview = useCallback(
+    (color) => {
+      if (!gameReviewData || !gameReviewData.moveAnalyses) return;
+      const errors = gameReviewData.moveAnalyses.filter(
+        (m) =>
+          m.color === color &&
+          ['inaccuracy', 'mistake', 'blunder'].includes(m.classification)
+      );
+
+      if (errors.length === 0) {
+        alert(
+          `${color === 'w' ? 'Beyaz' : 'Siyah'} bu maçta kusurlu hamle veya hata yapmadı!`
+        );
+        return;
+      }
+
+      setMistakeReview({
+        color,
+        errors,
+        currentIndex: 0,
+      });
+      setViewingPly(errors[0].ply);
+      setShowReviewArrows(true);
+    },
+    [gameReviewData]
+  );
+
+  // --- MULTIPLAYER WEBSOCKET ETKİNLİK DİNLEYİCİLERİ ---
+  useEffect(() => {
+    const unbindConn = multiplayerClient.on('connection_change', (connected) => {
+      setOnlineIsConnected(connected);
+    });
+    const unbindLobby = multiplayerClient.on('lobby_state', (state) => {
+      setOnlineLobbyState(state);
+    });
+    const unbindProfile = multiplayerClient.on('profile_updated', (profile) => {
+      setOnlineUserProfile({ ...profile });
+    });
+    const unbindQueue = multiplayerClient.on('queue_waiting', (q) => {
+      setOnlineWaitingQueue(q);
+    });
+    const unbindCancelQueue = multiplayerClient.on('queue_cancelled', () => {
+      setOnlineWaitingQueue(null);
+    });
+    const unbindChalCreated = multiplayerClient.on('challenge_created', (data) => {
+      setOnlineMyChallenge(data);
+    });
+    const unbindGameStart = multiplayerClient.on('game_start', (data) => {
+      setOnlineActiveGame(data);
+      setOnlineWaitingQueue(null);
+      setOnlineMyChallenge(null);
+      setOnlineDrawOffered(false);
+      setOnlineGameOverData(null);
+      setOnlineChatMessages([]);
+      const newG = new Chess();
+      onlineGameRef.current = newG;
+      setOnlineFen(newG.fen());
+      setOnlineTimeline([newG.fen()]);
+      setOnlineMoveHistory([]);
+      setOnlineTimeWhiteMs(data.timeWhiteMs);
+      setOnlineTimeBlackMs(data.timeBlackMs);
+      soundEngine.playGameStart();
+    });
+    const unbindOpponentMove = multiplayerClient.on('opponent_move', (data) => {
+      const g = onlineGameRef.current;
+      const moveRes = g.move({
+        from: data.move.from,
+        to: data.move.to,
+        promotion: data.move.promotion,
+      });
+      if (moveRes) {
+        setOnlineFen(g.fen());
+        setOnlineTimeline((prev) => [...prev, g.fen()]);
+        setOnlineMoveHistory(g.history({ verbose: true }));
+        setOnlineTimeWhiteMs(data.timeWhiteMs);
+        setOnlineTimeBlackMs(data.timeBlackMs);
+        if (moveRes.captured) soundEngine.playCapture();
+        else if (g.inCheck()) soundEngine.playCheck();
+        else soundEngine.playMove();
+      }
+    });
+    const unbindDrawOffered = multiplayerClient.on('draw_offered', () => {
+      setOnlineDrawOffered(true);
+    });
+    const unbindDrawDeclined = multiplayerClient.on('draw_declined', () => {
+      alert('Rakip beraberlik teklifini reddetti.');
+    });
+    const unbindChat = multiplayerClient.on('chat_msg', (msg) => {
+      setOnlineChatMessages((prev) => [...prev, msg]);
+    });
+    const unbindGameOver = multiplayerClient.on('game_over', (data) => {
+      setOnlineGameOverData(data);
+      if (data.winner === onlineActiveGame?.myColor) {
+        soundEngine.playVictory();
+      } else if (data.winner === 'draw') {
+        soundEngine.playDraw();
+      } else {
+        soundEngine.playDefeat();
+      }
+    });
+
+    return () => {
+      unbindConn();
+      unbindLobby();
+      unbindProfile();
+      unbindQueue();
+      unbindCancelQueue();
+      unbindChalCreated();
+      unbindGameStart();
+      unbindOpponentMove();
+      unbindDrawOffered();
+      unbindDrawDeclined();
+      unbindChat();
+      unbindGameOver();
+    };
+  }, [onlineActiveGame?.myColor]);
+
+  // Canlı maçta saat sayacı (Fischer dijital saat akışı)
+  useEffect(() => {
+    if (appMode !== 'online' || !onlineActiveGame || onlineGameOverData) return;
+    if (onlineMoveHistory.length === 0) return; // İlk hamle yapılana kadar süre akmaz
+
+    const interval = setInterval(() => {
+      const turn = onlineGameRef.current.turn();
+      if (turn === 'w') {
+        setOnlineTimeWhiteMs((prev) => Math.max(0, prev - 100));
+      } else {
+        setOnlineTimeBlackMs((prev) => Math.max(0, prev - 100));
+      }
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [appMode, onlineActiveGame, onlineGameOverData, onlineMoveHistory.length]);
+
+  // Online hamle denemesi
+  const attemptOnlineMove = useCallback(
+    (from, to, promotion = null) => {
+      if (!onlineActiveGame || onlineGameOverData) return false;
+      const g = onlineGameRef.current;
+      if (g.turn() !== onlineActiveGame.myColor) return false;
+
+      // Terfi kontrolü
+      const piece = g.get(from);
+      if (
+        piece &&
+        piece.type === 'p' &&
+        ((piece.color === 'w' && to[1] === '8') ||
+          (piece.color === 'b' && to[1] === '1')) &&
+        !promotion
+      ) {
+        setOnlinePendingPromo({ from, to, color: piece.color });
+        return true;
+      }
+
+      try {
+        const moveRes = g.move({
+          from,
+          to,
+          promotion: promotion || undefined,
+        });
+        if (moveRes) {
+          setOnlineFen(g.fen());
+          setOnlineTimeline((prev) => [...prev, g.fen()]);
+          setOnlineMoveHistory(g.history({ verbose: true }));
+          setOnlineSelectedSq(null);
+          setOnlinePendingPromo(null);
+
+          if (moveRes.captured) soundEngine.playCapture();
+          else if (g.inCheck()) soundEngine.playCheck();
+          else soundEngine.playMove();
+
+          multiplayerClient.sendMove({
+            gameId: onlineActiveGame.gameId,
+            from: moveRes.from,
+            to: moveRes.to,
+            promotion: moveRes.promotion,
+            san: moveRes.san,
+            fen: g.fen(),
+            isCheckmate: g.isGameOver() && g.inCheck(),
+            isDraw: g.isDraw() || g.isThreefoldRepetition(),
+          });
+          return true;
+        }
+      } catch (err) {
+        console.error('Online move error:', err);
+      }
+      return false;
+    },
+    [onlineActiveGame, onlineGameOverData]
+  );
+
+  // Biten online maçı anında Stockfish Analiz Stüdyosu & Doğruluk İncelemesine Aktar
+  const reviewOnlineGameWithStockfish = useCallback(() => {
+    if (onlineTimeline.length <= 1) return;
+    setFenTimeline([...onlineTimeline]);
+    setMoveHistory([...onlineMoveHistory]);
+    setViewingPly(null);
+    setImportedGameMeta({
+      white:
+        onlineActiveGame?.myColor === 'w'
+          ? onlineUserProfile.username
+          : onlineActiveGame?.opponent.username,
+      black:
+        onlineActiveGame?.myColor === 'b'
+          ? onlineUserProfile.username
+          : onlineActiveGame?.opponent.username,
+      date: new Date().toLocaleDateString('tr-TR'),
+    });
+    setOnlineActiveGame(null);
+    setOnlineGameOverData(null);
+    setAppMode('play');
+    setIsReviewingGame(true);
+    setDismissGameOverModal(true);
+    setTimeout(() => {
+      runFullGameAccuracyReview(onlineTimeline, onlineMoveHistory);
+    }, 100);
+  }, [
+    onlineTimeline,
+    onlineMoveHistory,
+    onlineActiveGame,
+    onlineUserProfile.username,
+  ]);
+
   // --- MAÇ SONU TAM DOĞRULUK ANALİZİ (GAME REVIEW) ---
   const runFullGameAccuracyReview = useCallback(
     async (customFens = null, customMoves = null) => {
@@ -486,10 +747,20 @@ export default function App() {
         setReviewProgress(Math.round(((i + 1) / fens.length) * 100));
       }
 
-      // Her hamleyi sınıflandır ve Beyaz/Siyah doğruluk ortalamalarını çıkar
+      // Her hamleyi sınıflandır, ACPL ve Açılış/Oyun Ortası/Oyun Sonu doğruluğunu çıkar
       const moveAnalyses = [];
       const whiteAccList = [];
       const blackAccList = [];
+      const cplListW = [];
+      const cplListB = [];
+      const phaseAcc = {
+        openingW: [],
+        openingB: [],
+        midW: [],
+        midB: [],
+        endW: [],
+        endB: [],
+      };
       const counts = {
         w: {
           best: 0,
@@ -525,8 +796,21 @@ export default function App() {
         );
 
         counts[m.color][result.classification]++;
-        if (m.color === 'w') whiteAccList.push(result.accuracy);
-        else blackAccList.push(result.accuracy);
+        const moveNumber = Math.floor(i / 2) + 1;
+
+        if (m.color === 'w') {
+          whiteAccList.push(result.accuracy);
+          cplListW.push(result.cpl || 0);
+          if (moveNumber <= 10) phaseAcc.openingW.push(result.accuracy);
+          else if (moveNumber <= 30) phaseAcc.midW.push(result.accuracy);
+          else phaseAcc.endW.push(result.accuracy);
+        } else {
+          blackAccList.push(result.accuracy);
+          cplListB.push(result.cpl || 0);
+          if (moveNumber <= 10) phaseAcc.openingB.push(result.accuracy);
+          else if (moveNumber <= 30) phaseAcc.midB.push(result.accuracy);
+          else phaseAcc.endB.push(result.accuracy);
+        }
 
         moveAnalyses.push({
           ply: i + 1,
@@ -538,18 +822,44 @@ export default function App() {
           bestMoveUci: engineBestUci,
           classification: result.classification,
           accuracy: Math.round(result.accuracy),
+          cpl: result.cpl || 0,
+          winDrop: result.winDrop || 0,
           evalAfter: nextEval,
         });
       }
 
-      const avg = (arr) =>
+      const avg = (arr, def = 100) =>
         arr.length === 0
-          ? 75
+          ? def
           : Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10;
 
+      const totalWhiteAcc = avg(whiteAccList, 75);
+      const totalBlackAcc = avg(blackAccList, 75);
+
+      const acplW = Math.round(
+        cplListW.reduce((a, b) => a + b, 0) / Math.max(1, cplListW.length)
+      );
+      const acplB = Math.round(
+        cplListB.reduce((a, b) => a + b, 0) / Math.max(1, cplListB.length)
+      );
+
       setGameReviewData({
-        whiteAccuracy: avg(whiteAccList),
-        blackAccuracy: avg(blackAccList),
+        whiteAccuracy: totalWhiteAcc,
+        blackAccuracy: totalBlackAcc,
+        whiteAcpl: acplW,
+        blackAcpl: acplB,
+        phases: {
+          w: {
+            opening: Math.round(avg(phaseAcc.openingW, totalWhiteAcc)),
+            middlegame: Math.round(avg(phaseAcc.midW, totalWhiteAcc)),
+            endgame: Math.round(avg(phaseAcc.endW, 100)),
+          },
+          b: {
+            opening: Math.round(avg(phaseAcc.openingB, totalBlackAcc)),
+            middlegame: Math.round(avg(phaseAcc.midB, totalBlackAcc)),
+            endgame: Math.round(avg(phaseAcc.endB, 100)),
+          },
+        },
         counts,
         moveAnalyses,
         posEvals,
@@ -1089,15 +1399,30 @@ export default function App() {
 
   // --- AKTİF GÖRÜNTÜLENEN TAHTA VERİLERİNİN HESAPLANMASI ---
   const activeBoardMatrix = useMemo(() => {
+    if (appMode === 'online') {
+      return parseFenToBoardMatrix(onlineFen);
+    }
     if (appMode === 'analysis') {
       if (isBoardEditorOpen) return editorMatrix;
       return parseFenToBoardMatrix(analysisFen);
     }
     return parseFenToBoardMatrix(displayedPlayFen);
-  }, [appMode, isBoardEditorOpen, editorMatrix, analysisFen, displayedPlayFen]);
+  }, [
+    appMode,
+    onlineFen,
+    isBoardEditorOpen,
+    editorMatrix,
+    analysisFen,
+    displayedPlayFen,
+  ]);
 
   // Görüntülenen konumdaki son hamle vurgusu
   const displayedLastMove = useMemo(() => {
+    if (appMode === 'online') {
+      if (onlineMoveHistory.length === 0) return null;
+      const m = onlineMoveHistory[onlineMoveHistory.length - 1];
+      return m ? { from: m.from, to: m.to } : null;
+    }
     if (appMode === 'analysis') {
       if (isBoardEditorOpen || analysisPly === 0) return null;
       const m = analysisHistory[analysisPly - 1];
@@ -1108,6 +1433,7 @@ export default function App() {
     return m ? { from: m.from, to: m.to } : lastMove;
   }, [
     appMode,
+    onlineMoveHistory,
     isBoardEditorOpen,
     analysisPly,
     analysisHistory,
@@ -1118,6 +1444,20 @@ export default function App() {
 
   // Görüntülenen konumda şah tehdit altında mı?
   const displayedKingInCheckSquare = useMemo(() => {
+    if (appMode === 'online') {
+      if (!onlineGameRef.current.inCheck()) return null;
+      const turnColor = onlineGameRef.current.turn();
+      const b = onlineGameRef.current.board();
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          const p = b[r][c];
+          if (p && p.type === 'k' && p.color === turnColor) {
+            return p.square;
+          }
+        }
+      }
+      return null;
+    }
     const targetFen = appMode === 'analysis' ? analysisFen : displayedPlayFen;
     if (appMode === 'analysis' && isBoardEditorOpen) return null;
     try {
@@ -1137,10 +1477,21 @@ export default function App() {
       return null;
     }
     return null;
-  }, [appMode, isBoardEditorOpen, analysisFen, displayedPlayFen]);
+  }, [appMode, onlineFen, isBoardEditorOpen, analysisFen, displayedPlayFen]);
 
   // Seçili kare için yasal hamleler
   const activeLegalMoves = useMemo(() => {
+    if (appMode === 'online') {
+      if (!onlineSelectedSq || onlineGameOverData) return [];
+      try {
+        return onlineGameRef.current.moves({
+          square: onlineSelectedSq,
+          verbose: true,
+        });
+      } catch {
+        return [];
+      }
+    }
     if (appMode === 'analysis') {
       if (isBoardEditorOpen || !analysisSelectedSq) return [];
       try {
@@ -1160,6 +1511,9 @@ export default function App() {
     }
   }, [
     appMode,
+    onlineSelectedSq,
+    onlineGameOverData,
+    onlineFen,
     isBoardEditorOpen,
     analysisSelectedSq,
     analysisFen,
@@ -1442,18 +1796,56 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [appMode, moveHistory.length, analysisPly, analysisTimeline.length, isBoardEditorOpen]);
 
-  const topBarColor = orientation === 'w' ? 'b' : 'w';
-  const bottomBarColor = orientation === 'w' ? 'w' : 'b';
+  const topBarColor =
+    appMode === 'online' && onlineActiveGame
+      ? onlineActiveGame.myColor === 'w'
+        ? 'b'
+        : 'w'
+      : orientation === 'w'
+      ? 'b'
+      : 'w';
+  const bottomBarColor =
+    appMode === 'online' && onlineActiveGame
+      ? onlineActiveGame.myColor
+      : orientation === 'w'
+      ? 'w'
+      : 'b';
+
+  const formatClockMs = (ms) => {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    if (totalSec < 10) {
+      const tenths = Math.floor((ms % 1000) / 100);
+      return `${s}.${tenths}`;
+    }
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
 
   const renderPlayerBar = (barColor) => {
-    const isBot = barColor !== playerColor;
+    const isOnline = appMode === 'online' && !!onlineActiveGame;
+    const isBot = !isOnline && barColor !== playerColor;
+    const isOpponent = isOnline && barColor !== onlineActiveGame.myColor;
+
     const capturedList =
-      barColor === 'w' ? materialInfo.capturedByWhite : materialInfo.capturedByBlack;
+      barColor === 'w'
+        ? materialInfo.capturedByWhite
+        : materialInfo.capturedByBlack;
     const capturedPieceColor = barColor === 'w' ? 'b' : 'w';
     const advantage =
-      barColor === 'w' ? materialInfo.whiteAdvantage : materialInfo.blackAdvantage;
-    const currentTurn = (displayedPlayFen.split(' ')[1] || 'w');
-    const isActiveTurn = currentTurn === barColor && !gameOverState.isOver;
+      barColor === 'w'
+        ? materialInfo.whiteAdvantage
+        : materialInfo.blackAdvantage;
+
+    const currentTurn = isOnline
+      ? onlineGameRef.current.turn()
+      : displayedPlayFen.split(' ')[1] || 'w';
+    const isActiveTurn =
+      currentTurn === barColor &&
+      (isOnline ? !onlineGameOverData : !gameOverState.isOver);
+
+    const onlineTimeMs =
+      barColor === 'w' ? onlineTimeWhiteMs : onlineTimeBlackMs;
 
     const accuracyForBar =
       gameReviewData &&
@@ -1470,18 +1862,32 @@ export default function App() {
         <div className="flex items-center gap-2.5 min-w-0">
           <div
             className={`w-8 h-8 rounded flex items-center justify-center border ${
-              isBot
+              isOnline
+                ? isOpponent
+                  ? 'bg-[#302e2c] border-amber-500/60 text-amber-400'
+                  : 'bg-[#302e2c] border-[#3692e7]/60 text-[#3692e7]'
+                : isBot
                 ? 'bg-[#302e2c] border-[#629924]/60 text-[#629924]'
                 : 'bg-[#302e2c] border-[#3692e7]/60 text-[#3692e7]'
             }`}
           >
-            {isBot ? <Cpu className="w-4 h-4" /> : <Trophy className="w-4 h-4" />}
+            {isOnline ? (
+              <User className="w-4 h-4" />
+            ) : isBot ? (
+              <Cpu className="w-4 h-4" />
+            ) : (
+              <Trophy className="w-4 h-4" />
+            )}
           </div>
 
           <div className="truncate">
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold text-white truncate">
-                {importedGameMeta
+                {isOnline
+                  ? isOpponent
+                    ? onlineActiveGame.opponent.username
+                    : onlineUserProfile.username
+                  : importedGameMeta
                   ? barColor === 'w'
                     ? `${importedGameMeta.whiteName} (${importedGameMeta.whiteRating})`
                     : `${importedGameMeta.blackName} (${importedGameMeta.blackRating})`
@@ -1493,6 +1899,16 @@ export default function App() {
                   ? 'Stockfish Bot'
                   : 'Sen (Oyuncu)'}
               </span>
+              {isOnline && (
+                <span className="px-1.5 py-0.5 text-[11px] font-bold rounded bg-amber-500/20 text-amber-400 border border-amber-500/40">
+                  {isOpponent
+                    ? `${onlineActiveGame.opponent.rating} ELO`
+                    : `${
+                        onlineUserProfile.ratings[onlineActiveGame.category] ||
+                        1500
+                      } ELO`}
+                </span>
+              )}
               {appMode === 'play' && !importedGameMeta && isBot && (
                 <span className="px-1.5 py-0.5 text-[11px] font-bold rounded bg-[#3692e7]/20 text-[#3692e7] border border-[#3692e7]/40">
                   {botElo} ELO
@@ -1528,17 +1944,33 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          {isOnline && (
+            <div
+              className={`px-3 py-1 rounded font-mono font-black text-xs sm:text-sm tracking-wide border flex items-center gap-1.5 ${
+                isActiveTurn && onlineTimeMs < 20000
+                  ? 'bg-red-950/80 border-red-500 text-red-400 animate-pulse'
+                  : isActiveTurn
+                  ? 'bg-[#1b1917] border-[#629924] text-white shadow'
+                  : 'bg-[#1b1917] border-[#3c3934] text-[#999]'
+              }`}
+            >
+              <Clock className="w-3.5 h-3.5 text-[#888]" />
+              <span>{formatClockMs(onlineTimeMs)}</span>
+            </div>
+          )}
           {appMode === 'play' && isBot && isBotThinking && (
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#629924]/20 border border-[#629924]/50 text-[#8cd936] text-xs font-medium animate-pulse">
               <span className="w-2 h-2 rounded-full bg-[#8cd936] animate-ping" />
               Bot düşünüyor...
             </div>
           )}
-          {appMode === 'play' && !isBot && isActiveTurn && !isViewingPastMove && (
-            <span className="px-2 py-0.5 rounded bg-[#629924]/20 text-[#8cd936] text-xs font-semibold">
-              Sıra Sende
-            </span>
-          )}
+          {((appMode === 'play' && !isBot && !isViewingPastMove) ||
+            (isOnline && !isOpponent)) &&
+            isActiveTurn && (
+              <span className="px-2 py-0.5 rounded bg-[#629924]/20 text-[#8cd936] text-xs font-semibold">
+                Sıra Sende
+              </span>
+            )}
         </div>
       </div>
     );
@@ -1586,8 +2018,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* ANA MOD SEÇİCİ: Mobilde tam genişlikte 3 eşit sekme, PC'de orijinal yatay grup */}
-          <div className="grid grid-cols-3 sm:flex items-center bg-[#262421] p-0.5 rounded-md border border-[#3c3934] w-full sm:w-auto">
+          {/* ANA MOD SEÇİCİ: Mobilde tam genişlikte 4 sekme, PC'de yatay grup */}
+          <div className="grid grid-cols-4 sm:flex items-center bg-[#262421] p-0.5 rounded-md border border-[#3c3934] w-full sm:w-auto">
             <button
               type="button"
               onClick={() => setAppMode('play')}
@@ -1599,6 +2031,27 @@ export default function App() {
             >
               <Swords className="w-3.5 h-3.5 shrink-0" />
               <span>Botla Maç</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
+                if (engineRef.current) engineRef.current.stop();
+                setIsBotThinking(false);
+                setAppMode('online');
+                multiplayerClient.connect();
+              }}
+              className={`flex items-center justify-center gap-1.5 px-2 sm:px-3 py-1.5 rounded text-[11px] sm:text-xs font-bold transition-colors truncate ${
+                appMode === 'online'
+                  ? 'bg-amber-600 text-white shadow'
+                  : 'text-[#bababa] hover:text-white'
+              }`}
+            >
+              <Users className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Canlı Oyna</span>
+              {onlineLobbyState.onlineCount > 1 && (
+                <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse ml-0.5 hidden sm:inline-block" />
+              )}
             </button>
             <button
               type="button"
@@ -1713,6 +2166,32 @@ export default function App() {
           onOpenGameInAnalysis={handleOpenImportedGameInAnalysis}
           onOpenGameInFullReview={handleOpenImportedGameInFullReview}
         />
+      ) : appMode === 'online' && !onlineActiveGame ? (
+        <main className="flex-1 max-w-5xl w-full mx-auto px-2 sm:px-6 py-6">
+          <MultiplayerLobby
+            client={multiplayerClient}
+            userProfile={onlineUserProfile}
+            lobbyState={onlineLobbyState}
+            isConnected={onlineIsConnected}
+            waitingQueue={onlineWaitingQueue}
+            myActiveChallenge={onlineMyChallenge}
+            onQuickPair={(tc, rated) => multiplayerClient.quickPair(tc, rated)}
+            onCancelPair={() => {
+              multiplayerClient.cancelPair();
+              setOnlineWaitingQueue(null);
+            }}
+            onCreateChallenge={(params) =>
+              multiplayerClient.createChallenge(params)
+            }
+            onCancelChallenge={(id) => {
+              multiplayerClient.cancelChallenge(id);
+              setOnlineMyChallenge(null);
+            }}
+            onJoinChallenge={(id) => multiplayerClient.joinChallenge(id)}
+            onJoinByCode={(code) => multiplayerClient.joinByCode(code)}
+            onUpdateUsername={(name) => multiplayerClient.updateUsername(name)}
+          />
+        </main>
       ) : (
       <main className="flex-1 max-w-7xl w-full mx-auto px-2 sm:px-6 py-4 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* SOL BÖLÜM: TAHTA + EVAL BAR (Sadece Analiz veya Maç Sonunda) */}
@@ -1746,25 +2225,134 @@ export default function App() {
                 visible={isEvalBarAllowed}
               />
 
-              <div className="relative flex-1 flex justify-center">
+              <div className="relative flex-1 flex flex-col items-center justify-center gap-2">
+                {/* LICHESS STİLİ HATA İNCELEME ÇUBUĞU (REVIEW MISTAKES BAR) */}
+                {mistakeReview && mistakeReview.errors.length > 0 && (
+                  <div className="w-full bg-[#1b2533] border-2 border-[#3692e7] rounded-md p-2 flex items-center justify-between text-xs shadow-lg animate-fade-in">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-white">
+                        {mistakeReview.color === 'w' ? '⚪ Beyaz' : '⚫ Siyah'} Hatası{' '}
+                        {mistakeReview.currentIndex + 1} / {mistakeReview.errors.length}
+                      </span>
+                      <span
+                        className="px-1.5 py-0.5 rounded font-bold uppercase text-[10px]"
+                        style={{
+                          backgroundColor:
+                            MOVE_CLASSIFICATIONS[
+                              mistakeReview.errors[mistakeReview.currentIndex]
+                                ?.classification
+                            ]?.color || '#e68a2e',
+                          color: '#fff',
+                        }}
+                      >
+                        {
+                          MOVE_CLASSIFICATIONS[
+                            mistakeReview.errors[mistakeReview.currentIndex]
+                              ?.classification
+                          ]?.label || 'Hata'
+                        }
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={mistakeReview.currentIndex <= 0}
+                        onClick={() => {
+                          const nextIdx = mistakeReview.currentIndex - 1;
+                          setMistakeReview((prev) => ({
+                            ...prev,
+                            currentIndex: nextIdx,
+                          }));
+                          setViewingPly(mistakeReview.errors[nextIdx].ply);
+                        }}
+                        className="px-2 py-1 rounded bg-[#273549] hover:bg-[#344661] disabled:opacity-40 text-white font-bold cursor-pointer"
+                      >
+                        ← Önceki
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          mistakeReview.currentIndex >=
+                          mistakeReview.errors.length - 1
+                        }
+                        onClick={() => {
+                          const nextIdx = mistakeReview.currentIndex + 1;
+                          setMistakeReview((prev) => ({
+                            ...prev,
+                            currentIndex: nextIdx,
+                          }));
+                          setViewingPly(mistakeReview.errors[nextIdx].ply);
+                        }}
+                        className="px-2 py-1 rounded bg-[#3692e7] hover:bg-[#2563eb] disabled:opacity-40 text-white font-bold cursor-pointer"
+                      >
+                        Sonraki →
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setMistakeReview(null)}
+                        className="px-2 py-1 text-[#aaa] hover:text-white cursor-pointer"
+                        title="İncelemeyi Bitir"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <ChessBoard
                   board={activeBoardMatrix}
-                  orientation={orientation}
+                  orientation={
+                    appMode === 'online' && onlineActiveGame
+                      ? onlineActiveGame.myColor
+                      : orientation
+                  }
                   themeKey={boardTheme}
                   selectedSquare={
-                    appMode === 'analysis' ? analysisSelectedSq : selectedSquare
+                    appMode === 'online'
+                      ? onlineSelectedSq
+                      : appMode === 'analysis'
+                      ? analysisSelectedSq
+                      : selectedSquare
                   }
                   legalMovesForSelected={activeLegalMoves}
                   lastMove={displayedLastMove}
                   kingInCheckSquare={displayedKingInCheckSquare}
                   pendingPromotion={
-                    appMode === 'analysis' ? analysisPendingPromo : pendingPromotion
+                    appMode === 'online'
+                      ? onlinePendingPromo
+                      : appMode === 'analysis'
+                      ? analysisPendingPromo
+                      : pendingPromotion
                   }
                   arrows={boardArrows}
                   moveBadge={activeMoveBadge}
                   editorMode={appMode === 'analysis' && isBoardEditorOpen}
                   onEditorSquareClick={handleEditorSquareClick}
                   onSquareClick={(sq) => {
+                    if (appMode === 'online') {
+                      if (onlineGameOverData) return;
+                      if (onlineGameRef.current.turn() !== onlineActiveGame?.myColor)
+                        return;
+                      if (onlineSelectedSq) {
+                        if (onlineSelectedSq === sq) {
+                          setOnlineSelectedSq(null);
+                          return;
+                        }
+                        const moved = attemptOnlineMove(onlineSelectedSq, sq);
+                        if (moved) return;
+                      }
+                      const clicked = onlineGameRef.current.get(sq);
+                      if (
+                        clicked &&
+                        clicked.color === onlineActiveGame?.myColor
+                      ) {
+                        setOnlineSelectedSq(sq);
+                      } else {
+                        setOnlineSelectedSq(null);
+                      }
+                      return;
+                    }
                     if (appMode === 'analysis') {
                       if (isBoardEditorOpen) return;
                       if (analysisSelectedSq) {
@@ -1805,6 +2393,13 @@ export default function App() {
                     }
                   }}
                   onPieceDrop={(fromSq, toSq) => {
+                    if (appMode === 'online') {
+                      if (onlineGameOverData) return;
+                      if (onlineGameRef.current.turn() !== onlineActiveGame?.myColor)
+                        return;
+                      attemptOnlineMove(fromSq, toSq);
+                      return;
+                    }
                     if (appMode === 'analysis') {
                       if (isBoardEditorOpen) return;
                       attemptAnalysisMove(fromSq, toSq);
@@ -1815,7 +2410,13 @@ export default function App() {
                     }
                   }}
                   onCompletePromotion={(pieceType) => {
-                    if (appMode === 'analysis' && analysisPendingPromo) {
+                    if (appMode === 'online' && onlinePendingPromo) {
+                      attemptOnlineMove(
+                        onlinePendingPromo.from,
+                        onlinePendingPromo.to,
+                        pieceType
+                      );
+                    } else if (appMode === 'analysis' && analysisPendingPromo) {
                       attemptAnalysisMove(
                         analysisPendingPromo.from,
                         analysisPendingPromo.to,
@@ -1832,12 +2433,120 @@ export default function App() {
                   onCancelPromotion={() => {
                     setPendingPromotion(null);
                     setAnalysisPendingPromo(null);
+                    setOnlinePendingPromo(null);
                   }}
                   disabled={
-                    appMode === 'play' &&
-                    (gameOverState.isOver || isViewingPastMove)
+                    (appMode === 'play' &&
+                      (gameOverState.isOver || isViewingPastMove)) ||
+                    (appMode === 'online' &&
+                      (!!onlineGameOverData ||
+                        onlineGameRef.current.turn() !==
+                          onlineActiveGame?.myColor))
                   }
                 />
+
+                {/* ONLINE MAÇ SONU MODAL PENCERESİ */}
+                {appMode === 'online' && onlineGameOverData && (
+                  <div className="absolute inset-0 z-40 bg-black/80 backdrop-blur-[2px] flex items-center justify-center p-4 animate-fade-in">
+                    <div className="bg-[#262421] border-2 border-amber-500 rounded-lg max-w-sm w-full p-5 shadow-2xl text-center space-y-4">
+                      <div className="w-14 h-14 rounded-full bg-amber-500/20 border-2 border-amber-500 text-amber-400 mx-auto flex items-center justify-center">
+                        <Trophy className="w-8 h-8" />
+                      </div>
+
+                      <div>
+                        <h2 className="text-xl font-black text-white">
+                          {onlineGameOverData.winner === onlineActiveGame?.myColor
+                            ? '🏆 TEBRİKLER, KAZANDINIZ!'
+                            : onlineGameOverData.winner === 'draw'
+                            ? '🤝 MAÇ BERABERE'
+                            : 'KAYBETTİNİZ'}
+                        </h2>
+                        <p className="text-xs text-[#aaa] mt-1 capitalize">
+                          Sebep:{' '}
+                          {onlineGameOverData.reason === 'checkmate'
+                            ? 'Şah Mat'
+                            : onlineGameOverData.reason === 'timeout'
+                            ? 'Süre Bitti (Bayrak Düştü)'
+                            : onlineGameOverData.reason === 'resignation'
+                            ? 'Terk Edildi'
+                            : 'Beraberlik'}
+                        </p>
+                      </div>
+
+                      {/* ELO Değişimi Kartı */}
+                      {onlineGameOverData.ratingChanges && (
+                        <div className="bg-[#1b1917] p-3 rounded border border-[#3c3934] text-xs">
+                          <span className="text-[#888] block mb-1">
+                            {onlineActiveGame?.category?.toUpperCase()} ELO DEĞİŞİMİ
+                          </span>
+                          <div className="flex items-center justify-center gap-2 text-base font-bold text-white">
+                            <span>
+                              {onlineGameOverData.myColor === 'w'
+                                ? onlineGameOverData.ratingChanges.white.old
+                                : onlineGameOverData.ratingChanges.black.old}
+                            </span>
+                            <span className="text-[#888]">→</span>
+                            <span
+                              className={
+                                (onlineGameOverData.myColor === 'w'
+                                  ? onlineGameOverData.ratingChanges.white.delta
+                                  : onlineGameOverData.ratingChanges.black.delta) >= 0
+                                  ? 'text-green-400'
+                                  : 'text-red-400'
+                              }
+                            >
+                              {onlineGameOverData.myColor === 'w'
+                                ? onlineGameOverData.ratingChanges.white.new
+                                : onlineGameOverData.ratingChanges.black.new}
+                            </span>
+                            <span
+                              className={`text-xs px-1.5 py-0.5 rounded ${
+                                (onlineGameOverData.myColor === 'w'
+                                  ? onlineGameOverData.ratingChanges.white.delta
+                                  : onlineGameOverData.ratingChanges.black.delta) >= 0
+                                  ? 'bg-green-950 text-green-300'
+                                  : 'bg-red-950 text-red-300'
+                              }`}
+                            >
+                              {(onlineGameOverData.myColor === 'w'
+                                ? onlineGameOverData.ratingChanges.white.delta
+                                : onlineGameOverData.ratingChanges.black.delta) >= 0
+                                ? `+${
+                                    onlineGameOverData.myColor === 'w'
+                                      ? onlineGameOverData.ratingChanges.white.delta
+                                      : onlineGameOverData.ratingChanges.black.delta
+                                  }`
+                                : onlineGameOverData.myColor === 'w'
+                                ? onlineGameOverData.ratingChanges.white.delta
+                                : onlineGameOverData.ratingChanges.black.delta}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="flex flex-col gap-2 pt-2">
+                        <button
+                          type="button"
+                          onClick={reviewOnlineGameWithStockfish}
+                          className="w-full py-2.5 px-4 rounded bg-[#3692e7] hover:bg-[#2878c2] text-white text-xs sm:text-sm font-bold shadow flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                        >
+                          <Award className="w-4 h-4" />
+                          🔍 Bu Maçı Stockfish ile Analiz Et
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOnlineActiveGame(null);
+                            setOnlineGameOverData(null);
+                          }}
+                          className="w-full py-2 px-3 rounded bg-[#36332e] hover:bg-[#44403a] text-white text-xs font-semibold cursor-pointer transition-colors"
+                        >
+                          Lobiye Dön
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* OYUN SONU MODAL PENCERESİ (DOĞRULUK ANALİZİ BAŞLATMA BUTONLU) */}
                 {appMode === 'play' &&
@@ -2155,7 +2864,198 @@ export default function App() {
 
         {/* SAĞ BÖLÜM: MODA GÖRE MAÇ PANELİ VEYA STOCKFISH ANALİZ STÜDYOSU PANELİ */}
         <div className="lg:col-span-5 xl:col-span-4 w-full max-w-[600px] mx-auto lg:max-w-none flex flex-col gap-4">
-          {appMode === 'play' ? (
+          {appMode === 'online' && onlineActiveGame ? (
+            <div className="bg-[#262421] border border-[#3c3934] rounded-lg p-4 flex flex-col gap-4 shadow-xl">
+              {/* Online Maç Bilgi Başlığı */}
+              <div className="flex items-center justify-between border-b border-[#3c3934] pb-3">
+                <div>
+                  <h3 className="font-bold text-white text-base flex items-center gap-2">
+                    <Swords className="w-4 h-4 text-amber-500" />
+                    <span>
+                      {onlineActiveGame.timeMinutes}+{onlineActiveGame.incSeconds}{' '}
+                      {onlineActiveGame.category?.toUpperCase()}
+                    </span>
+                  </h3>
+                  <div className="text-xs text-[#888] mt-0.5">
+                    {onlineActiveGame.rated
+                      ? 'Puanlı Maç (Rated Elo)'
+                      : 'Puansız Dostluk Maçı'}{' '}
+                    • Oda: {onlineActiveGame.code}
+                  </div>
+                </div>
+                <span
+                  className={`px-2.5 py-1 rounded text-xs font-bold ${
+                    onlineActiveGame.myColor === 'w'
+                      ? 'bg-neutral-100 text-black'
+                      : 'bg-black text-white border border-neutral-700'
+                  }`}
+                >
+                  {onlineActiveGame.myColor === 'w' ? '⚪ Beyazsın' : '⚫ Siyahsın'}
+                </span>
+              </div>
+
+              {/* Hamle Geçmişi Notasyonu */}
+              <div className="bg-[#1e1c18] border border-[#3c3934] rounded-md p-3 max-h-56 overflow-y-auto text-xs font-mono">
+                {onlineMoveHistory.length === 0 ? (
+                  <div className="text-center text-[#666] py-6">
+                    Maç başladı. İlk hamle bekleniyor...
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                    {onlineMoveHistory
+                      .reduce((acc, m, i) => {
+                        if (i % 2 === 0) acc.push([m]);
+                        else acc[acc.length - 1].push(m);
+                        return acc;
+                      }, [])
+                      .map((pair, turnIdx) => (
+                        <div
+                          key={turnIdx}
+                          className="flex items-center gap-2 text-white"
+                        >
+                          <span className="text-[#666] w-6">{turnIdx + 1}.</span>
+                          <span className="font-bold">{pair[0]?.san}</span>
+                          {pair[1] && (
+                            <span className="text-[#aaa]">{pair[1]?.san}</span>
+                          )}
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Maç İçi Aksiyon Butonları (Terk, Beraberlik, Sohbet) */}
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      window.confirm('Bu maçı terk etmek istediğinize emin misiniz?')
+                    ) {
+                      multiplayerClient.resign(onlineActiveGame.gameId);
+                    }
+                  }}
+                  className="bg-[#3a2020] hover:bg-[#522525] border border-red-900/60 text-red-300 py-2 rounded text-xs font-bold transition-colors cursor-pointer"
+                >
+                  🚩 Terk Et
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    multiplayerClient.offerDraw(onlineActiveGame.gameId);
+                    alert('Beraberlik teklifi rakibe gönderildi.');
+                  }}
+                  className="bg-[#24262b] hover:bg-[#32363d] border border-[#3c3934] text-[#ccc] py-2 rounded text-xs font-bold transition-colors cursor-pointer"
+                >
+                  🤝 Beraberlik
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowOnlineChat((v) => !v)}
+                  className={`border py-2 rounded text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${
+                    showOnlineChat
+                      ? 'bg-[#3692e7] border-[#3692e7] text-white'
+                      : 'bg-[#1e1c18] border-[#3c3934] text-[#aaa] hover:text-white'
+                  }`}
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>Sohbet</span>
+                </button>
+              </div>
+
+              {/* Rakip Beraberlik Teklif Ettiğinde Bildirim */}
+              {onlineDrawOffered && (
+                <div className="bg-[#2a2e1d] border-2 border-yellow-500 rounded p-3 flex items-center justify-between gap-3 text-xs">
+                  <span className="text-yellow-200 font-bold">
+                    Rakip beraberlik teklif etti!
+                  </span>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        multiplayerClient.respondDraw(
+                          onlineActiveGame.gameId,
+                          true
+                        );
+                        setOnlineDrawOffered(false);
+                      }}
+                      className="bg-green-600 hover:bg-green-500 text-white px-3 py-1 rounded font-bold cursor-pointer"
+                    >
+                      Kabul Et
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        multiplayerClient.respondDraw(
+                          onlineActiveGame.gameId,
+                          false
+                        );
+                        setOnlineDrawOffered(false);
+                      }}
+                      className="bg-red-700 hover:bg-red-600 text-white px-3 py-1 rounded font-bold cursor-pointer"
+                    >
+                      Reddet
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Canlı Oyun İçi Sohbet Bölümü */}
+              {showOnlineChat && (
+                <div className="border border-[#3c3934] rounded-md p-3 bg-[#1e1c18] flex flex-col gap-2">
+                  <div className="text-[11px] font-bold uppercase text-[#888]">
+                    Oyun İçi Sohbet
+                  </div>
+                  <div className="h-32 overflow-y-auto space-y-1.5 text-xs pr-1">
+                    {onlineChatMessages.length === 0 ? (
+                      <div className="text-[#555] text-center py-4">
+                        Henüz mesaj yok
+                      </div>
+                    ) : (
+                      onlineChatMessages.map((msg, i) => (
+                        <div key={i} className="leading-snug">
+                          <strong className="text-[#3692e7]">
+                            {msg.sender}:{' '}
+                          </strong>
+                          <span className="text-[#e0e0e0]">{msg.text}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (onlineChatInput.trim()) {
+                        multiplayerClient.sendChat(
+                          onlineActiveGame.gameId,
+                          onlineChatInput.trim()
+                        );
+                        setOnlineChatInput('');
+                      }
+                    }}
+                    className="flex gap-1.5 mt-1"
+                  >
+                    <input
+                      type="text"
+                      placeholder="Mesaj yazın..."
+                      value={onlineChatInput}
+                      onChange={(e) => setOnlineChatInput(e.target.value)}
+                      maxLength={120}
+                      className="flex-1 bg-[#141311] border border-[#3c3934] text-white px-2.5 py-1 text-xs rounded outline-none"
+                    />
+                    <button
+                      type="submit"
+                      className="bg-[#3692e7] text-white px-3 py-1 rounded text-xs font-bold cursor-pointer"
+                    >
+                      <Send className="w-3 h-3" />
+                    </button>
+                  </form>
+                </div>
+              )}
+            </div>
+          ) : appMode === 'play' ? (
             <>
               {/* MAÇ SONU DOĞRULUK RAPORU KARTI (GAME REVIEW) */}
               {(gameOverState.isOver || isReviewingGame) && (
@@ -2436,23 +3336,160 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="flex flex-col gap-3">
-                      {/* Beyaz vs Siyah Doğruluk Kutuları */}
-                      <div className="grid grid-cols-2 gap-2.5">
-                        <div className="p-2.5 rounded bg-[#1e1c19] border border-[#3c3934] flex flex-col items-center">
-                          <span className="text-[11px] text-[#999] font-medium">
-                            Beyaz Doğruluk
-                          </span>
-                          <span className="text-xl font-extrabold text-white mt-0.5">
-                            %{gameReviewData.whiteAccuracy}
-                          </span>
+                      {/* LICHESS STİLİ BEYAZ & SİYAH DOĞRULUK VE HATA ANALİZ KARTLARI */}
+                      <div className="space-y-3">
+                        {/* ⚪ Beyaz Kartı */}
+                        <div className="p-3.5 rounded-lg bg-[#1e1c19] border border-[#3c3934] flex flex-col gap-2.5">
+                          <div className="flex items-center justify-between border-b border-[#3c3934]/60 pb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="w-3.5 h-3.5 rounded-full bg-white border border-neutral-400 inline-block shadow-sm" />
+                              <span className="font-bold text-white text-xs">
+                                {importedGameMeta?.white || 'Beyaz'}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-lg font-black text-white">
+                                %{gameReviewData.whiteAccuracy}
+                              </span>
+                              <span className="text-[11px] text-[#888]">Doğruluk</span>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3 text-xs">
+                            <div className="space-y-1 text-[#aaa]">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[#e68a2e] font-bold">
+                                  {gameReviewData.counts.w.inaccuracy}
+                                </span>
+                                <span>Kusurlu hamle</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-orange-500 font-bold">
+                                  {gameReviewData.counts.w.mistake}
+                                </span>
+                                <span>Hata</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-red-500 font-bold">
+                                  {gameReviewData.counts.w.blunder}
+                                </span>
+                                <span>Vahim hata</span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px] pt-1 border-t border-[#3c3934]/40">
+                                <span className="text-white font-bold">
+                                  {gameReviewData.whiteAcpl || 0}
+                                </span>
+                                <span className="text-[#888]">Ortalama santipiyon kaybı</span>
+                              </div>
+                            </div>
+
+                            <div className="space-y-1 text-right text-[#aaa] border-l border-[#3c3934]/60 pl-3">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[#888]">Açılış:</span>
+                                <span className="text-[#8cd936] font-bold">
+                                  %{gameReviewData.phases?.w?.opening || gameReviewData.whiteAccuracy}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[#888]">Oyun ortası:</span>
+                                <span className="text-[#8cd936] font-bold">
+                                  %{gameReviewData.phases?.w?.middlegame || gameReviewData.whiteAccuracy}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[#888]">Oyun sonu:</span>
+                                <span className="text-[#8cd936] font-bold">
+                                  %{gameReviewData.phases?.w?.endgame || 100}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => startMistakeReview('w')}
+                            className="w-full mt-1 py-2 px-3 rounded bg-[#3692e7] hover:bg-[#2878c2] text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer shadow"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            BEYAZIN HATALARINI GÖZDEN GEÇİRİN
+                          </button>
                         </div>
-                        <div className="p-2.5 rounded bg-[#1e1c19] border border-[#3c3934] flex flex-col items-center">
-                          <span className="text-[11px] text-[#999] font-medium">
-                            Siyah Doğruluk
-                          </span>
-                          <span className="text-xl font-extrabold text-white mt-0.5">
-                            %{gameReviewData.blackAccuracy}
-                          </span>
+
+                        {/* ⚫ Siyah Kartı */}
+                        <div className="p-3.5 rounded-lg bg-[#1e1c19] border border-[#3c3934] flex flex-col gap-2.5">
+                          <div className="flex items-center justify-between border-b border-[#3c3934]/60 pb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="w-3.5 h-3.5 rounded-full bg-black border border-neutral-600 inline-block shadow-sm" />
+                              <span className="font-bold text-white text-xs">
+                                {importedGameMeta?.black || 'Siyah'}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-lg font-black text-white">
+                                %{gameReviewData.blackAccuracy}
+                              </span>
+                              <span className="text-[11px] text-[#888]">Doğruluk</span>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3 text-xs">
+                            <div className="space-y-1 text-[#aaa]">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[#e68a2e] font-bold">
+                                  {gameReviewData.counts.b.inaccuracy}
+                                </span>
+                                <span>Kusurlu hamle</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-orange-500 font-bold">
+                                  {gameReviewData.counts.b.mistake}
+                                </span>
+                                <span>Hata</span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-red-500 font-bold">
+                                  {gameReviewData.counts.b.blunder}
+                                </span>
+                                <span>Vahim hata</span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px] pt-1 border-t border-[#3c3934]/40">
+                                <span className="text-white font-bold">
+                                  {gameReviewData.blackAcpl || 0}
+                                </span>
+                                <span className="text-[#888]">Ortalama santipiyon kaybı</span>
+                              </div>
+                            </div>
+
+                            <div className="space-y-1 text-right text-[#aaa] border-l border-[#3c3934]/60 pl-3">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[#888]">Açılış:</span>
+                                <span className="text-[#8cd936] font-bold">
+                                  %{gameReviewData.phases?.b?.opening || gameReviewData.blackAccuracy}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[#888]">Oyun ortası:</span>
+                                <span className="text-[#e68a2e] font-bold">
+                                  %{gameReviewData.phases?.b?.middlegame || gameReviewData.blackAccuracy}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[#888]">Oyun sonu:</span>
+                                <span className="text-[#8cd936] font-bold">
+                                  %{gameReviewData.phases?.b?.endgame || 100}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => startMistakeReview('b')}
+                            className="w-full mt-1 py-2 px-3 rounded bg-[#3692e7] hover:bg-[#2878c2] text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer shadow"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            SİYAHIN HATALARINI GÖZDEN GEÇİRİN
+                          </button>
                         </div>
                       </div>
 

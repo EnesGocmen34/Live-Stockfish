@@ -1,14 +1,10 @@
 services:
   - type: web
-    name: lichess-stockfish-arena
-    runtime: static
+    name: live-stockfish
+    runtime: node
+    plan: free
     buildCommand: npm install && npm run build
-    staticPublishPath: ./dist
-    headers:
-      - path: /*
-        name: Cache-Control
-        value: public, max-age=3600
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production

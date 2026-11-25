@@ -101,7 +101,7 @@ export function getEngineParamsForElo(elo) {
   };
 }
 
-// Lichess kazanma olasılığı (Win%) ve Hamle Doğruluğu (% Accuracy) formülü
+// Lichess kazanma olasılığı (Win%) formülü: W = 50 + 50 * (2 / (1 + exp(-0.00368208 * cp)) - 1)
 export function evalToWinPercentWhite(evalObj) {
   if (!evalObj) return 50;
   let cp = 0;
@@ -113,6 +113,17 @@ export function evalToWinPercentWhite(evalObj) {
   return 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * cp)) - 1);
 }
 
+// Beyaz perspektifinden santipiyon (Capped +/- 1000cp, Lichess standardı)
+export function evalToCappedCpWhite(evalObj) {
+  if (!evalObj) return 0;
+  if (evalObj.type === 'mate') {
+    return evalObj.value > 0 ? 1000 : -1000;
+  }
+  const cp = Math.round((evalObj.value || 0) * 100);
+  return Math.max(-1000, Math.min(1000, cp));
+}
+
+// Lichess standardı Centipawn Loss (CPL) ve Win% kaybına göre hamle sınıflandırması ve doğruluğu
 export function classifyMoveFromEvalDrop(
   prevEval,
   nextEval,
@@ -120,19 +131,7 @@ export function classifyMoveFromEvalDrop(
   playedUci,
   bestMoveUci
 ) {
-  const winBeforeWhite = evalToWinPercentWhite(prevEval);
-  const winAfterWhite = evalToWinPercentWhite(nextEval);
-
-  const winBeforeMover = moverColor === 'w' ? winBeforeWhite : 100 - winBeforeWhite;
-  const winAfterMover = moverColor === 'w' ? winAfterWhite : 100 - winAfterWhite;
-
-  const winDrop = Math.max(0, winBeforeMover - winAfterMover);
-
-  // Lichess hamle doğruluğu formülü: 103.1668 * exp(-0.04354 * winDrop) - 3.1669
-  const rawAcc = 103.1668 * Math.exp(-0.04354 * winDrop) - 3.1669;
-  const accuracy = Math.max(0, Math.min(100, rawAcc));
-
-  // Eğer motorun 1 numaralı hamlesi oynandıysa doğrudan "best"
+  // Eğer oynanan hamle motorun en iyi hamlesi ise: %100 Doğruluk, 0 CPL, 'best'
   if (
     bestMoveUci &&
     playedUci &&
@@ -140,30 +139,63 @@ export function classifyMoveFromEvalDrop(
   ) {
     return {
       classification: 'best',
-      accuracy: Math.max(96, accuracy),
+      accuracy: 100,
       winDrop: 0,
+      cpl: 0,
     };
   }
 
+  const prevCpWhite = evalToCappedCpWhite(prevEval);
+  const nextCpWhite = evalToCappedCpWhite(nextEval);
+
+  // Hamleyi yapan tarafın perspektifinden santipiyonlar
+  const moverCpBefore = moverColor === 'w' ? prevCpWhite : -prevCpWhite;
+  const moverCpAfter = moverColor === 'w' ? nextCpWhite : -nextCpWhite;
+
+  // Santipiyon kaybı (CPL): Hamleyle kaybedilen skor miktarı
+  const cpl = Math.max(0, moverCpBefore - moverCpAfter);
+
+  // Kazanma yüzdesi kaybı (Win%)
+  const winBeforeWhite = evalToWinPercentWhite(prevEval);
+  const winAfterWhite = evalToWinPercentWhite(nextEval);
+  const winBeforeMover = moverColor === 'w' ? winBeforeWhite : 100 - winBeforeWhite;
+  const winAfterMover = moverColor === 'w' ? winAfterWhite : 100 - winAfterWhite;
+  const winDrop = Math.max(0, winBeforeMover - winAfterMover);
+
+  // Eşit pozisyonda 100 cp (1 piyon) yaklaşık 8% winDrop'a eşittir.
+  // Tamamen kayıp veya kazanç konumlarda winDrop ~0 çıksa dahi (Lichess'teki gibi)
+  // cpl / 12.5 oranı pozisyon bağımsız nesnel hata kaybını korur.
+  const cplEquivDrop = cpl / 12.5;
+  const effectiveDrop = Math.max(winDrop, cplEquivDrop);
+
+  // Lichess hamle doğruluk formülü: 103.1668 * exp(-0.04354 * effectiveDrop) - 3.1669
+  const rawAcc = 103.1668 * Math.exp(-0.04354 * effectiveDrop) - 3.1669;
+  const accuracy = Math.max(0, Math.min(100, Math.round(rawAcc * 10) / 10));
+
+  // Lichess standart sınıflandırma eşikleri:
+  // Vahim hata (Blunder ??): CPL >= 250 veya effectiveDrop >= 20.0
+  // Hata (Mistake ?): CPL >= 120 veya effectiveDrop >= 10.0
+  // Kusurlu hamle (Inaccuracy ?!): CPL >= 50 veya effectiveDrop >= 4.5
   let classification = 'good';
-  if (winDrop <= 2.2) {
-    classification = 'best';
-  } else if (winDrop <= 5.5) {
-    classification = 'excellent';
-  } else if (winDrop <= 10.5) {
-    classification = 'good';
-  } else if (winDrop <= 18.0) {
-    classification = 'inaccuracy';
-  } else if (winDrop <= 30.0) {
-    classification = 'mistake';
-  } else {
+  if (cpl >= 250 || effectiveDrop >= 20.0) {
     classification = 'blunder';
+  } else if (cpl >= 120 || effectiveDrop >= 10.0) {
+    classification = 'mistake';
+  } else if (cpl >= 50 || effectiveDrop >= 4.5) {
+    classification = 'inaccuracy';
+  } else if (cpl >= 20 || effectiveDrop >= 2.0) {
+    classification = 'good';
+  } else if (cpl >= 8 || effectiveDrop >= 0.8) {
+    classification = 'excellent';
+  } else {
+    classification = 'best';
   }
 
   return {
     classification,
     accuracy,
-    winDrop,
+    winDrop: Math.round(winDrop * 10) / 10,
+    cpl: Math.round(cpl),
   };
 }
 
