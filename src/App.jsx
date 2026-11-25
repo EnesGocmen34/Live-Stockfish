@@ -32,6 +32,8 @@ import {
   BarChart3,
   Settings,
   Users,
+  User,
+  Clock,
   MessageSquare,
   Send,
 } from 'lucide-react';
@@ -1548,8 +1550,11 @@ export default function App() {
 
   // Oynanan Maçın veya Analiz Tahtasının Anlık GM2600 Açılış & Varyant İsmi
   const activePlayOpeningInfo = useMemo(() => {
+    if (appMode === 'online') {
+      return detectOpeningAndVariation(onlineMoveHistory);
+    }
     return detectOpeningAndVariation(moveHistory.slice(0, activePlayPly));
-  }, [moveHistory, activePlayPly]);
+  }, [appMode, onlineMoveHistory, moveHistory, activePlayPly]);
 
   const activeAnalysisOpeningInfo = useMemo(() => {
     const localDetected = detectOpeningAndVariation(
@@ -1755,12 +1760,31 @@ export default function App() {
     return pairs;
   }, [analysisHistory]);
 
+  // Hamle Çiftleri (Online Mod)
+  const onlineMovePairs = useMemo(() => {
+    const pairs = [];
+    for (let i = 0; i < onlineMoveHistory.length; i += 2) {
+      pairs.push({
+        moveNumber: Math.floor(i / 2) + 1,
+        white: onlineMoveHistory[i],
+        whitePly: i + 1,
+        black: onlineMoveHistory[i + 1] || null,
+        blackPly: i + 2,
+      });
+    }
+    return pairs;
+  }, [onlineMoveHistory]);
+
   const materialInfo = useMemo(
     () =>
       calculateCapturedAndAdvantage(
-        appMode === 'analysis' ? analysisFen : displayedPlayFen
+        appMode === 'online'
+          ? onlineFen
+          : appMode === 'analysis'
+          ? analysisFen
+          : displayedPlayFen
       ),
-    [appMode, analysisFen, displayedPlayFen]
+    [appMode, onlineFen, analysisFen, displayedPlayFen]
   );
 
   // Klavye Sol/Sağ Ok Tuşları ile Hamle Geçmişinde Gezinme
@@ -2635,14 +2659,22 @@ export default function App() {
 
                 {/* Mobilde Yatay Kaydırılabilir Tıklanabilir Hamle Şeridi */}
                 <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-1 px-1 bg-[#1a1816] rounded border border-[#3c3934] text-xs font-mono">
-                  {(appMode === 'analysis' ? analysisMovePairs : movePairs)
-                    .length === 0 ? (
+                  {(appMode === 'online'
+                    ? onlineMovePairs
+                    : appMode === 'analysis'
+                    ? analysisMovePairs
+                    : movePairs
+                  ).length === 0 ? (
                     <span className="text-[11px] text-[#777] font-sans px-1">
                       Hamle yapıldığında burada tıklanabilir olarak listelenir...
                     </span>
                   ) : (
-                    (appMode === 'analysis' ? analysisMovePairs : movePairs).map(
-                      (pair) => (
+                    (appMode === 'online'
+                      ? onlineMovePairs
+                      : appMode === 'analysis'
+                      ? analysisMovePairs
+                      : movePairs
+                    ).map((pair) => (
                         <div
                           key={pair.moveNumber}
                           className="flex items-center gap-0.5 shrink-0"
