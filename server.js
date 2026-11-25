@@ -1,6 +1,8 @@
 import express from 'express';
 import http from 'http';
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 
@@ -10,6 +12,67 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(express.json());
+
+// --- KALICI KULLANICI VERİTABANI (DATA/USERS.JSON) ---
+const DATA_DIR = path.join(__dirname, 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+
+function loadUsersFromDisk() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(USERS_FILE)) {
+      const raw = fs.readFileSync(USERS_FILE, 'utf8');
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    console.error('Failed to load users from disk:', err);
+  }
+  return {};
+}
+
+const usersStore = loadUsersFromDisk();
+
+function saveUsersToDisk() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(USERS_FILE, JSON.stringify(usersStore, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to save users to disk:', err);
+  }
+}
+
+const sessions = new Map(); // token -> userId
+
+function hashPassword(password) {
+  return crypto.createHash('sha256').update(password + '_salt_live_sf_2026').digest('hex');
+}
+
+function toPublicUser(u) {
+  if (!u) return null;
+  return {
+    id: u.id,
+    username: u.username,
+    email: u.email,
+    ratings: u.ratings || { bullet: 1500, blitz: 1500, rapid: 1500, classical: 1500 },
+    stats: u.stats || { wins: 0, losses: 0, draws: 0, total: 0 },
+    createdAt: u.createdAt || Date.now(),
+  };
+}
+
+function formatUsername(name) {
+  let cleaned = (name || '').trim();
+  if (!cleaned.startsWith('@')) {
+    cleaned = '@' + cleaned;
+  }
+  return cleaned;
+}
+
+// --- REST API ENDPOINTS ---
 app.use(express.static(path.join(__dirname, 'dist'), {
   setHeaders: (res, filePath) => {
     if (filePath.endsWith('.wasm')) {
@@ -22,9 +85,126 @@ app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
     onlineUsers: connectedUsers.size,
+    registeredUsersCount: Object.keys(usersStore).length,
     activeGames: activeGames.size,
     openChallenges: openChallenges.size
   });
+});
+
+// Kayıt Ol (Register)
+app.post('/api/auth/register', (req, res) => {
+  const { username, email, password } = req.body || {};
+  if (!username || !email || !password) {
+    return res.status(400).json({ error: 'Kullanıcı adı, e-posta ve şifre zorunludur.' });
+  }
+
+  const formattedUsername = formatUsername(username);
+  if (formattedUsername.length < 4) {
+    return res.status(400).json({ error: 'Kullanıcı adı en az 3 karakter olmalıdır.' });
+  }
+  if (!email.includes('@') || !email.includes('.')) {
+    return res.status(400).json({ error: 'Geçerli bir e-posta adresi giriniz.' });
+  }
+  if (password.length < 4) {
+    return res.status(400).json({ error: 'Şifre en az 4 karakter olmalıdır.' });
+  }
+
+  const existingUsers = Object.values(usersStore);
+  const usernameTaken = existingUsers.some(
+    u => u.username.toLowerCase() === formattedUsername.toLowerCase()
+  );
+  if (usernameTaken) {
+    return res.status(400).json({ error: 'Bu kullanıcı adı zaten alınmış!' });
+  }
+
+  const emailTaken = existingUsers.some(
+    u => (u.email || '').toLowerCase() === email.trim().toLowerCase()
+  );
+  if (emailTaken) {
+    return res.status(400).json({ error: 'Bu e-posta adresiyle kayıtlı bir hesap zaten var!' });
+  }
+
+  const userId = 'usr_' + crypto.randomBytes(6).toString('hex');
+  const newUser = {
+    id: userId,
+    username: formattedUsername,
+    email: email.trim().toLowerCase(),
+    passwordHash: hashPassword(password),
+    ratings: { bullet: 1500, blitz: 1500, rapid: 1500, classical: 1500 },
+    stats: { wins: 0, losses: 0, draws: 0, total: 0 },
+    createdAt: Date.now()
+  };
+
+  usersStore[userId] = newUser;
+  saveUsersToDisk();
+
+  const token = crypto.randomBytes(24).toString('hex');
+  sessions.set(token, userId);
+
+  return res.json({
+    ok: true,
+    user: toPublicUser(newUser),
+    token
+  });
+});
+
+// Giriş Yap (Login)
+app.post('/api/auth/login', (req, res) => {
+  const { login, password } = req.body || {};
+  if (!login || !password) {
+    return res.status(400).json({ error: 'Kullanıcı adı/e-posta ve şifre zorunludur.' });
+  }
+
+  const search = login.trim().toLowerCase();
+  const searchFormatted = search.startsWith('@') ? search : '@' + search;
+  const hash = hashPassword(password);
+
+  const user = Object.values(usersStore).find(
+    u => (u.username.toLowerCase() === search || u.username.toLowerCase() === searchFormatted || u.email.toLowerCase() === search) && u.passwordHash === hash
+  );
+
+  if (!user) {
+    return res.status(401).json({ error: 'Kullanıcı adı, e-posta veya şifre hatalı!' });
+  }
+
+  const token = crypto.randomBytes(24).toString('hex');
+  sessions.set(token, user.id);
+
+  return res.json({
+    ok: true,
+    user: toPublicUser(user),
+    token
+  });
+});
+
+// Mevcut Giriş Oturumunu Doğrula (Me)
+app.get('/api/auth/me', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!token || !sessions.has(token)) {
+    return res.status(401).json({ error: 'Oturum bulunamadı veya süresi dolmuş.' });
+  }
+
+  const userId = sessions.get(token);
+  const user = usersStore[userId];
+  if (!user) {
+    return res.status(401).json({ error: 'Kullanıcı bulunamadı.' });
+  }
+
+  return res.json({
+    ok: true,
+    user: toPublicUser(user)
+  });
+});
+
+// Çıkış Yap (Logout)
+app.post('/api/auth/logout', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (token) {
+    sessions.delete(token);
+  }
+  return res.json({ ok: true });
 });
 
 app.get('*', (_req, res) => {
@@ -49,7 +229,6 @@ function getEloCategory(minutes, incSeconds) {
 }
 
 function calculateEloChanges(ratingW, ratingB, result) {
-  // result: 1 (White win), 0 (Black win), 0.5 (Draw)
   const K = 32;
   const expW = 1 / (1 + Math.pow(10, (ratingB - ratingW) / 400));
   const expB = 1 - expW;
@@ -219,13 +398,39 @@ function endGame(gameId, winner, reason) {
   let eloChanges = null;
   if (game.rated) {
     eloChanges = calculateEloChanges(game.white.rating, game.black.rating, resultScore);
-    // Oyuncuların yerel nesnelerini güncelle
+
+    // Canlı oturumlardaki nesneleri güncelle
     if (game.white.user.ratings) {
       game.white.user.ratings[game.category] = eloChanges.white.new;
     }
     if (game.black.user.ratings) {
       game.black.user.ratings[game.category] = eloChanges.black.new;
     }
+
+    // KALICI VERİTABANI GÜNCELLEMESİ (users.json)
+    if (usersStore[game.white.user.id]) {
+      const u = usersStore[game.white.user.id];
+      if (!u.ratings) u.ratings = {};
+      u.ratings[game.category] = eloChanges.white.new;
+      if (!u.stats) u.stats = { wins: 0, losses: 0, draws: 0, total: 0 };
+      if (winner === 'w') u.stats.wins++;
+      else if (winner === 'draw') u.stats.draws++;
+      else u.stats.losses++;
+      u.stats.total++;
+    }
+
+    if (usersStore[game.black.user.id]) {
+      const u = usersStore[game.black.user.id];
+      if (!u.ratings) u.ratings = {};
+      u.ratings[game.category] = eloChanges.black.new;
+      if (!u.stats) u.stats = { wins: 0, losses: 0, draws: 0, total: 0 };
+      if (winner === 'b') u.stats.wins++;
+      else if (winner === 'draw') u.stats.draws++;
+      else u.stats.losses++;
+      u.stats.total++;
+    }
+
+    saveUsersToDisk();
   }
 
   const payload = {
@@ -251,7 +456,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [gameId, game] of activeGames.entries()) {
     if (game.status !== 'active') continue;
-    if (game.moves.length === 0) continue; // İlk hamle yapılana kadar süre akmaz
+    if (game.moves.length === 0) continue;
 
     const elapsed = now - game.lastMoveAt;
     if (game.turn === 'w') {
@@ -273,9 +478,10 @@ setInterval(() => {
 // WebSocket Bağlantı Yönetimi
 wss.on('connection', (ws) => {
   let currentUser = {
-    id: 'user_' + Math.random().toString(36).substring(2, 9),
-    username: 'Misafir_' + Math.floor(1000 + Math.random() * 9000),
-    ratings: { bullet: 1500, blitz: 1500, rapid: 1500, classical: 1500 }
+    id: 'guest_' + Math.random().toString(36).substring(2, 9),
+    username: '@Misafir_' + Math.floor(1000 + Math.random() * 9000),
+    ratings: { bullet: 1500, blitz: 1500, rapid: 1500, classical: 1500 },
+    stats: { wins: 0, losses: 0, draws: 0, total: 0 }
   };
   connectedUsers.set(ws, currentUser);
 
@@ -292,7 +498,6 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    const user = connectedUsers.get(ws);
     connectedUsers.delete(ws);
 
     // Açık meydan okumalarını kaldır
@@ -323,14 +528,20 @@ wss.on('connection', (ws) => {
 });
 
 function handleClientMessage(ws, data) {
-  const user = connectedUsers.get(ws);
+  let user = connectedUsers.get(ws);
   if (!user) return;
 
   switch (data.type) {
     case 'AUTH': {
-      if (data.user) {
+      if (data.token && sessions.has(data.token)) {
+        const uid = sessions.get(data.token);
+        if (usersStore[uid]) {
+          user = toPublicUser(usersStore[uid]);
+          connectedUsers.set(ws, user);
+        }
+      } else if (data.user) {
         user.id = data.user.id || user.id;
-        user.username = data.user.username || user.username;
+        user.username = formatUsername(data.user.username || user.username);
         user.ratings = data.user.ratings || user.ratings;
         connectedUsers.set(ws, user);
       }
@@ -340,7 +551,6 @@ function handleClientMessage(ws, data) {
     }
 
     case 'QUICK_PAIR': {
-      // tcKey: '1+0', '3+0', '3+2', '5+3', '10+0' vb.
       const tcKey = data.timeControl || '3+2';
       const rated = data.rated !== false;
       const parts = tcKey.split('+');
@@ -357,7 +567,6 @@ function handleClientMessage(ws, data) {
         const opponentItem = queue.shift();
         quickQueues.set(queueKey, queue);
 
-        // Rastgele renk dağılımı
         const isWhite = Math.random() < 0.5;
         const playerW = isWhite ? { ws, user } : opponentItem;
         const playerB = isWhite ? opponentItem : { ws, user };
@@ -370,7 +579,6 @@ function handleClientMessage(ws, data) {
           rated
         });
       } else {
-        // Kuyrukta bekle
         quickQueues.get(queueKey).push({ ws, user, tcKey, rated, timeMinutes, incSeconds });
         sendJson(ws, { type: 'QUEUE_WAITING', tcKey, rated });
       }
@@ -389,7 +597,7 @@ function handleClientMessage(ws, data) {
       const timeMinutes = parseFloat(data.timeMinutes) || 3;
       const incSeconds = parseFloat(data.incSeconds) || 0;
       const rated = data.rated !== false;
-      const color = data.color || 'random'; // 'w', 'b', 'random'
+      const color = data.color || 'random';
       const category = getEloCategory(timeMinutes, incSeconds);
       const challengeId = 'chal_' + Math.random().toString(36).substring(2, 9);
       const code = generateRoomCode();
@@ -474,7 +682,7 @@ function handleClientMessage(ws, data) {
       const moverWs = isWhiteTurn ? game.white.ws : game.black.ws;
       const opponentWs = isWhiteTurn ? game.black.ws : game.white.ws;
 
-      if (moverWs !== ws) return; // Yanlış oyuncu hamle yapmaya çalıştı
+      if (moverWs !== ws) return;
 
       const now = Date.now();
       if (game.moves.length > 0) {
@@ -495,7 +703,6 @@ function handleClientMessage(ws, data) {
         san: data.san
       });
 
-      // Hamleyi rakibe ilet
       sendJson(opponentWs, {
         type: 'OPPONENT_MOVE',
         gameId: game.id,
@@ -511,7 +718,6 @@ function handleClientMessage(ws, data) {
         turn: game.turn
       });
 
-      // Kontrol: Mat veya Beraberlik
       if (data.isCheckmate) {
         endGame(game.id, isWhiteTurn ? 'w' : 'b', 'checkmate');
       } else if (data.isDraw) {
@@ -576,5 +782,5 @@ function handleClientMessage(ws, data) {
 }
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Lichess Stockfish Arena (Multiplayer + Analysis) listening on port ${PORT}`);
+  console.log(`Lichess Stockfish Arena (Auth + Multiplayer) listening on port ${PORT}`);
 });

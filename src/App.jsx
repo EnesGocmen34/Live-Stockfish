@@ -36,12 +36,17 @@ import {
   Clock,
   MessageSquare,
   Send,
+  LogIn,
+  LogOut,
+  UserPlus,
 } from 'lucide-react';
 import ChessBoard, { BOARD_THEMES } from './components/ChessBoard.jsx';
 import ChessPiece from './components/ChessPieces.jsx';
 import EvalBar from './components/EvalBar.jsx';
 import AccountScout from './components/AccountScout.jsx';
 import MultiplayerLobby from './components/MultiplayerLobby.jsx';
+import AuthModal from './components/AuthModal.jsx';
+import { buildStandardPgn } from './utils/pgnExporter.js';
 import {
   multiplayerClient,
   loadUserProfile,
@@ -351,6 +356,7 @@ export default function App() {
   const [showNewGameModal, setShowNewGameModal] = useState(false);
   const [dismissGameOverModal, setDismissGameOverModal] = useState(false);
   const [copiedType, setCopiedType] = useState(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
 
   // Stockfish Web Worker Başlatma
   useEffect(() => {
@@ -1378,13 +1384,120 @@ export default function App() {
   // PGN ve FEN Kopyalama
   const handleCopy = async (type) => {
     try {
-      const activeFenStr = appMode === 'analysis' ? analysisFen : displayedPlayFen;
-      const text =
-        type === 'pgn'
-          ? (appMode === 'analysis'
-              ? analysisGameRef.current.pgn()
-              : game.pgn()) || '1. '
-          : activeFenStr;
+      const activeFenStr =
+        appMode === 'online'
+          ? onlineFen
+          : appMode === 'analysis'
+          ? analysisFen
+          : displayedPlayFen;
+
+      let text = '';
+      if (type === 'pgn') {
+        let whiteName = 'Beyaz';
+        let blackName = 'Siyah';
+        let whiteElo = '?';
+        let blackElo = '?';
+        let result = '*';
+        let termination = undefined;
+        let eventName = 'Live Chess Match';
+        let timeControlStr = undefined;
+        let targetGame = game;
+
+        if (appMode === 'online') {
+          targetGame = onlineGameRef.current || game;
+          const myName = onlineUserProfile.username || 'Oyuncu';
+          const myElo =
+            (onlineActiveGame &&
+              onlineUserProfile.ratings &&
+              onlineUserProfile.ratings[onlineActiveGame.category]) ||
+            1500;
+          const oppName = onlineActiveGame?.opponent?.username || 'Rakip';
+          const oppElo = onlineActiveGame?.opponent?.rating || 1500;
+
+          if (onlineActiveGame?.myColor === 'w') {
+            whiteName = myName;
+            whiteElo = myElo;
+            blackName = oppName;
+            blackElo = oppElo;
+          } else {
+            whiteName = oppName;
+            whiteElo = oppElo;
+            blackName = myName;
+            blackElo = myElo;
+          }
+
+          if (onlineGameOverData) {
+            result =
+              onlineGameOverData.winner === 'white'
+                ? '1-0'
+                : onlineGameOverData.winner === 'black'
+                ? '0-1'
+                : '1/2-1/2';
+            termination = onlineGameOverData.reason || undefined;
+          }
+
+          if (onlineActiveGame) {
+            timeControlStr = `${onlineActiveGame.timeMinutes * 60}+${onlineActiveGame.incSeconds}`;
+            eventName = `Online ${onlineActiveGame.category?.toUpperCase() || 'Blitz'} Match`;
+          }
+        } else if (appMode === 'play') {
+          targetGame = game;
+          const userStr = onlineUserProfile.username || 'Oyuncu';
+          const userElo = onlineUserProfile.ratings?.blitz || 1500;
+          eventName = `vs Stockfish (${botElo} ELO)`;
+
+          if (playerColor === 'w') {
+            whiteName = userStr;
+            whiteElo = userElo;
+            blackName = `Stockfish (${botElo})`;
+            blackElo = botElo;
+          } else {
+            whiteName = `Stockfish (${botElo})`;
+            whiteElo = botElo;
+            blackName = userStr;
+            blackElo = userElo;
+          }
+
+          if (gameOverState.isOver) {
+            result =
+              gameOverState.winner === 'w'
+                ? '1-0'
+                : gameOverState.winner === 'b'
+                ? '0-1'
+                : '1/2-1/2';
+            termination = gameOverState.reason || undefined;
+          }
+        } else if (appMode === 'analysis') {
+          targetGame = analysisGameRef.current;
+          if (importedGameMeta) {
+            whiteName = importedGameMeta.white || importedGameMeta.whiteName || 'Beyaz';
+            blackName = importedGameMeta.black || importedGameMeta.blackName || 'Siyah';
+            whiteElo = importedGameMeta.whiteElo || importedGameMeta.whiteRating || '?';
+            blackElo = importedGameMeta.blackElo || importedGameMeta.blackRating || '?';
+            result = importedGameMeta.result || '*';
+            eventName = importedGameMeta.event || 'İçe Aktarılan Maç Analizi';
+          } else {
+            eventName = 'Stockfish Analiz Stüdyosu';
+            whiteName = 'Analiz Beyaz';
+            blackName = 'Analiz Siyah';
+          }
+        }
+
+        text = buildStandardPgn(targetGame, {
+          event: eventName,
+          site: 'Live-Stockfish Chess (live-stockfishh.onrender.com)',
+          white: whiteName,
+          black: blackName,
+          whiteElo,
+          blackElo,
+          result,
+          timeControl: timeControlStr,
+          termination,
+        });
+      } else {
+        text = activeFenStr;
+      }
+
       await navigator.clipboard.writeText(text);
       setCopiedType(type);
       setTimeout(() => setCopiedType(null), 2000);
@@ -2015,8 +2128,28 @@ export default function App() {
               </span>
             </div>
 
-            {/* Mobil Sağ Üst Hızlı Ses + Yeni Maç Butonu (Sadece Mobilde Görünür, PC'de sağ blokta) */}
+            {/* Mobil Sağ Üst Hızlı Butonlar */}
             <div className="flex sm:hidden items-center gap-1.5">
+              {onlineUserProfile?.isRegistered ? (
+                <button
+                  type="button"
+                  onClick={() => multiplayerClient.logout()}
+                  className="flex items-center gap-1 px-2 py-1 rounded bg-[#262421] border border-red-900/50 text-red-400 text-[11px]"
+                  title="Çıkış Yap"
+                >
+                  <span className="font-bold text-[#8cd936] max-w-[70px] truncate">{onlineUserProfile.username}</span>
+                  <LogOut className="w-3 h-3" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowAuthModal(true)}
+                  className="flex items-center gap-1 px-2 py-1 rounded bg-[#3692e7]/20 border border-[#3692e7]/50 text-[#3692e7] text-[11px] font-semibold"
+                >
+                  <LogIn className="w-3 h-3" />
+                  <span>Giriş</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={toggleMute}
@@ -2033,7 +2166,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setShowNewGameModal(true)}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded bg-[#629924] text-white text-xs font-bold shadow"
+                  className="flex items-center gap-1 px-2 py-1.5 rounded bg-[#629924] text-white text-xs font-bold shadow"
                 >
                   <Play className="w-3 h-3 fill-current" />
                   Yeni Maç
@@ -2155,6 +2288,36 @@ export default function App() {
               </div>
             )}
 
+            {/* PC Kullanıcı Hesap Durumu / Giriş Butonu */}
+            {onlineUserProfile?.isRegistered ? (
+              <div className="flex items-center gap-2 bg-[#262421] border border-[#3c3934] rounded px-2.5 py-1.5 shadow-sm">
+                <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-xs font-bold text-[#8cd936] max-w-[110px] truncate" title={onlineUserProfile.username}>
+                  {onlineUserProfile.username}
+                </span>
+                <span className="text-[11px] text-[#aaa] font-mono bg-[#1c1b18] px-1.5 py-0.5 rounded border border-[#3c3934]">
+                  {onlineUserProfile.ratings?.blitz || 1500}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => multiplayerClient.logout()}
+                  className="text-xs text-red-400 hover:text-red-300 ml-0.5 p-0.5 rounded hover:bg-red-950/40 transition-colors"
+                  title="Çıkış Yap"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowAuthModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-[#262421] hover:bg-[#302e2c] border border-[#3c3934] text-xs font-bold text-white transition-colors cursor-pointer"
+              >
+                <LogIn className="w-3.5 h-3.5 text-[#3692e7]" />
+                <span>Giriş / Kayıt</span>
+              </button>
+            )}
+
             {/* Ses Aç/Kapa */}
             <button
               type="button"
@@ -2214,6 +2377,8 @@ export default function App() {
             onJoinChallenge={(id) => multiplayerClient.joinChallenge(id)}
             onJoinByCode={(code) => multiplayerClient.joinByCode(code)}
             onUpdateUsername={(name) => multiplayerClient.updateUsername(name)}
+            onOpenAuth={() => setShowAuthModal(true)}
+            onLogout={() => multiplayerClient.logout()}
           />
         </main>
       ) : (
@@ -4699,6 +4864,13 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* KULLANICI GİRİŞ & KAYIT MODALI */}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        client={multiplayerClient}
+      />
     </div>
   );
 }

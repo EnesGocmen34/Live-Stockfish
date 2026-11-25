@@ -1,4 +1,4 @@
-// Multiplayer WebSocket Client & User Profile Manager
+// Multiplayer WebSocket Client & User Profile Manager with Persistent Auth
 
 export function loadUserProfile() {
   try {
@@ -12,8 +12,9 @@ export function loadUserProfile() {
   }
 
   const newProfile = {
-    id: 'usr_' + Math.random().toString(36).substring(2, 10),
-    username: 'Oyuncu' + Math.floor(1000 + Math.random() * 9000),
+    id: 'guest_' + Math.random().toString(36).substring(2, 9),
+    username: '@Misafir_' + Math.floor(1000 + Math.random() * 9000),
+    isRegistered: false,
     ratings: {
       bullet: 1500,
       blitz: 1500,
@@ -39,6 +40,26 @@ export function saveUserProfile(profile) {
   }
 }
 
+export function getAuthToken() {
+  try {
+    return localStorage.getItem('chess_auth_token') || null;
+  } catch {
+    return null;
+  }
+}
+
+export function setAuthToken(token) {
+  try {
+    if (token) {
+      localStorage.setItem('chess_auth_token', token);
+    } else {
+      localStorage.removeItem('chess_auth_token');
+    }
+  } catch {
+    // ignore
+  }
+}
+
 class MultiplayerClient {
   constructor() {
     this.ws = null;
@@ -52,10 +73,115 @@ class MultiplayerClient {
       openChallenges: [],
       activeGameCount: 0,
     };
+
+    // Açılışta kayıtlı oturumu doğrula
+    this.checkAuth();
+  }
+
+  async checkAuth() {
+    const token = getAuthToken();
+    if (!token) return;
+    try {
+      const res = await fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.user) {
+          this.user = { ...data.user, isRegistered: true, isAuthenticated: true };
+          saveUserProfile(this.user);
+          this.emit('profile_updated', this.user);
+          this.send({ type: 'AUTH', token });
+        }
+      } else {
+        setAuthToken(null);
+      }
+    } catch (err) {
+      console.warn('Auth check failed:', err);
+    }
+  }
+
+  async register(username, email, password) {
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Kayıt başarısız oldu.');
+      }
+
+      setAuthToken(data.token);
+      this.user = { ...data.user, isRegistered: true, isAuthenticated: true };
+      saveUserProfile(this.user);
+      this.emit('profile_updated', this.user);
+
+      if (this.isConnected) {
+        this.send({ type: 'AUTH', token: data.token, user: this.user });
+      }
+      return { ok: true, user: this.user };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  async login(loginIdentifier, password) {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ login: loginIdentifier, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Giriş yapılamadı.');
+      }
+
+      setAuthToken(data.token);
+      this.user = { ...data.user, isRegistered: true, isAuthenticated: true };
+      saveUserProfile(this.user);
+      this.emit('profile_updated', this.user);
+
+      if (this.isConnected) {
+        this.send({ type: 'AUTH', token: data.token, user: this.user });
+      }
+      return { ok: true, user: this.user };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  }
+
+  async logout() {
+    const token = getAuthToken();
+    if (token) {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch {
+        // ignore
+      }
+    }
+
+    setAuthToken(null);
+    localStorage.removeItem('chess_user_profile');
+    this.user = loadUserProfile();
+    this.emit('profile_updated', this.user);
+
+    if (this.isConnected) {
+      this.send({ type: 'AUTH', user: this.user });
+    }
   }
 
   connect(customUrl = null) {
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
@@ -75,10 +201,9 @@ class MultiplayerClient {
       this.ws.onopen = () => {
         this.isConnected = true;
         this.emit('connection_change', true);
-        // Kimlik bildir
-        this.send({ type: 'AUTH', user: this.user });
+        const token = getAuthToken();
+        this.send({ type: 'AUTH', user: this.user, token });
 
-        // Ping heartbeat
         if (this.pingInterval) clearInterval(this.pingInterval);
         this.pingInterval = setInterval(() => {
           this.send({ type: 'PING' });
@@ -98,7 +223,6 @@ class MultiplayerClient {
         this.isConnected = false;
         this.emit('connection_change', false);
         if (this.pingInterval) clearInterval(this.pingInterval);
-        // Otomatik 4 saniye sonra yeniden bağlanmayı dene
         if (!this.reconnectTimer) {
           this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
@@ -120,8 +244,11 @@ class MultiplayerClient {
     switch (data.type) {
       case 'AUTH_OK':
         if (data.user) {
-          // Sunucuyla puanları eşitle
-          this.user.ratings = { ...this.user.ratings, ...data.user.ratings };
+          this.user = {
+            ...this.user,
+            ...data.user,
+            isRegistered: !!data.user.email || this.user.isRegistered,
+          };
           saveUserProfile(this.user);
           this.emit('profile_updated', this.user);
         }
@@ -157,15 +284,18 @@ class MultiplayerClient {
         break;
 
       case 'GAME_OVER':
-        // Profil istatistiklerini ve Elo puanını yerel olarak güncelle
         if (data.ratingChanges) {
           const myDelta =
             data.myColor === 'w'
               ? data.ratingChanges.white
               : data.ratingChanges.black;
           if (myDelta && data.category) {
+            if (!this.user.ratings) this.user.ratings = {};
             this.user.ratings[data.category] = myDelta.new;
           }
+        }
+        if (!this.user.stats) {
+          this.user.stats = { wins: 0, losses: 0, draws: 0, total: 0 };
         }
         if (data.winner === 'draw') {
           this.user.stats.draws++;
@@ -208,14 +338,6 @@ class MultiplayerClient {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(payload));
     }
-  }
-
-  updateUsername(newName) {
-    if (!newName || !newName.trim()) return;
-    this.user.username = newName.trim();
-    saveUserProfile(this.user);
-    this.send({ type: 'AUTH', user: this.user });
-    this.emit('profile_updated', this.user);
   }
 
   quickPair(timeControl = '3+2', rated = true) {

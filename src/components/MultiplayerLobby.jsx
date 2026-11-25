@@ -14,7 +14,10 @@ import {
   Trophy,
   Copy,
   Check,
-  Globe
+  Globe,
+  LogIn,
+  LogOut,
+  BadgeCheck
 } from 'lucide-react';
 
 const QUICK_PAIR_PRESETS = [
@@ -45,6 +48,8 @@ export default function MultiplayerLobby({
   onJoinChallenge,
   onJoinByCode,
   onUpdateUsername,
+  onOpenAuth,
+  onLogout,
 }) {
   const [isRated, setIsRated] = useState(true);
   const [showCustomModal, setShowCustomModal] = useState(false);
@@ -120,20 +125,51 @@ export default function MultiplayerLobby({
                   </button>
                 </form>
               ) : (
-                <div className="flex items-center gap-2">
-                  <h2 className="text-base sm:text-lg font-bold text-white tracking-wide">
-                    {userProfile?.username || 'Misafir Oyuncu'}
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h2 className="text-base sm:text-lg font-bold text-white tracking-wide flex items-center gap-1.5">
+                    <span className={userProfile?.isRegistered ? 'text-[#8cd936]' : 'text-white'}>
+                      {userProfile?.username || 'Misafir Oyuncu'}
+                    </span>
+                    {userProfile?.isRegistered && (
+                      <span className="flex items-center gap-0.5 text-[11px] bg-[#629924]/20 text-[#8cd936] border border-[#629924]/50 px-2 py-0.5 rounded-full font-semibold">
+                        <BadgeCheck className="w-3 h-3 text-[#8cd936]" />
+                        <span>Kayıtlı</span>
+                      </span>
+                    )}
                   </h2>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditNameValue(userProfile?.username || '');
-                      setIsEditingName(true);
-                    }}
-                    className="text-xs text-[#3692e7] hover:underline cursor-pointer"
-                  >
-                    (İsmi Değiştir)
-                  </button>
+
+                  {userProfile?.isRegistered ? (
+                    <button
+                      type="button"
+                      onClick={onLogout}
+                      className="text-xs text-red-400 hover:text-red-300 flex items-center gap-1 px-2 py-1 rounded bg-red-950/40 border border-red-800/40 hover:bg-red-900/50 transition-colors"
+                      title="Çıkış Yap"
+                    >
+                      <LogOut className="w-3 h-3" />
+                      <span>Çıkış Yap</span>
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditNameValue(userProfile?.username || '');
+                          setIsEditingName(true);
+                        }}
+                        className="text-xs text-[#888] hover:text-[#bbb] underline cursor-pointer"
+                      >
+                        (İsim Değiştir)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onOpenAuth}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#3692e7] hover:bg-[#2b79c2] text-white text-xs font-bold shadow transition-colors cursor-pointer"
+                      >
+                        <LogIn className="w-3 h-3" />
+                        <span>Giriş Yap / Üye Ol</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
               <div className="flex items-center gap-2 text-xs text-[#aaa] mt-0.5">
