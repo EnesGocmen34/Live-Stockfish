@@ -5,7 +5,6 @@ import { Chess } from 'chess.js';
 import { evalToWinPercentWhite, classifyMoveFromEvalDrop } from './stockfishEngine.js';
 import { detectOpeningAndVariation } from './openingBook.js';
 
-// İlk hamlelerden hızlı ECO & Açılış İsmi Tespit Sözlüğü (API'den açılış adı gelmezse yedek olarak kullanılır)
 const QUICK_OPENING_PREFIXES = [
   { prefix: '1. e4 c5', eco: 'B20', name: 'Sicilya Savunması' },
   { prefix: '1. e4 e5 2. Nf3 Nc6 3. Bb5', eco: 'C60', name: 'İspanyol Açılışı (Ruy Lopez)' },
@@ -34,8 +33,26 @@ const QUICK_OPENING_PREFIXES = [
   { prefix: '1. Nf3', eco: 'A04', name: 'Reti / Zukertort Açılışı' },
 ];
 
-function cleanChessComOpeningUrl(ecoUrl, pgnText = '') {
-  // Önce PGN içerisindeki hamlelerden GM2600 açılış & alt varyant ağacını kontrol et
+export function extractPgnHeader(pgn, tag) {
+  if (!pgn) return '';
+  const regex = new RegExp(`\\[${tag}\\s+"([^"]*)"\\]`, 'i');
+  const match = pgn.match(regex);
+  return match ? match[1].trim() : '';
+}
+
+function cleanChessComOpeningUrl(ecoUrl, pgnText = '', movesArray = []) {
+  if (movesArray && movesArray.length >= 2) {
+    const gmDetected = detectOpeningAndVariation(movesArray.slice(0, 18));
+    if (
+      gmDetected &&
+      gmDetected.name !== 'Şah Piyonu Açılışı (1. e4)' &&
+      gmDetected.name !== 'Vezir Piyonu Açılışı (1. d4)' &&
+      gmDetected.name !== 'Kanat / Hipermodern Açılış'
+    ) {
+      return `${gmDetected.eco} • ${gmDetected.name}: ${gmDetected.variation}`;
+    }
+  }
+
   if (pgnText) {
     try {
       const bodyOnly = pgnText.replace(/\[[^\]]*\]/g, ' ').trim();
@@ -73,9 +90,9 @@ function cleanChessComOpeningUrl(ecoUrl, pgnText = '') {
     if (cleaned) return cleaned;
   }
 
-  const openingHeader = pgnText.match(/\[Opening\s+"([^"]+)"\]/);
-  if (openingHeader && openingHeader[1] && openingHeader[1] !== '?') {
-    return openingHeader[1];
+  const openingHeader = extractPgnHeader(pgnText, 'Opening');
+  if (openingHeader && openingHeader !== '?') {
+    return openingHeader;
   }
 
   for (const item of QUICK_OPENING_PREFIXES) {
@@ -86,14 +103,6 @@ function cleanChessComOpeningUrl(ecoUrl, pgnText = '') {
   return 'Standart / Diğer Açılış';
 }
 
-function extractPgnHeader(pgn, tag) {
-  if (!pgn) return '';
-  const regex = new RegExp(`\\[${tag}\\s+"([^"]*)"\\]`);
-  const match = pgn.match(regex);
-  return match ? match[1] : '';
-}
-
-// Chess.com sonuç kodlarını ('win', 'checkmated', 'stalemate', 'repetition', vb.) normalize eder
 function normalizeChessComOutcome(resultStr) {
   if (resultStr === 'win') return 'win';
   const drawCodes = [
@@ -108,26 +117,89 @@ function normalizeChessComOutcome(resultStr) {
   return 'loss';
 }
 
-// PGN metninden hamle listesini (SAN) ve oyun sonu durumunu hafif şekilde çıkarır
-export function parseGameMovesAndTimeline(pgn) {
-  const chess = new Chess();
-  try {
-    chess.loadPgn(pgn);
-    const history = chess.history({ verbose: true });
-    const replay = new Chess();
-    const fens = [replay.fen()];
-    for (const m of history) {
-      replay.move(m);
-      fens.push(replay.fen());
+// Hem PGN hem de ham SAN dizisini (%100 hata toleranslı, saat yorumlarını {[%clk ...]} temizleyerek) ayrıştırır
+export function parseGameMovesAndTimeline(pgnOrGame, fallbackMovesStr = '') {
+  const pgn =
+    typeof pgnOrGame === 'string' ? pgnOrGame : pgnOrGame?.pgn || '';
+  const rawMovesStr =
+    fallbackMovesStr ||
+    (typeof pgnOrGame === 'object' ? pgnOrGame?.movesStr || '' : '');
+
+  // 1. Yöntem: Doğrudan chess.js loadPgn
+  if (pgn) {
+    try {
+      const chess = new Chess();
+      chess.loadPgn(pgn);
+      const history = chess.history({ verbose: true });
+      if (history.length > 0) {
+        const replay = new Chess();
+        const fens = [replay.fen()];
+        for (const m of history) {
+          replay.move(m);
+          fens.push(replay.fen());
+        }
+        return { history, fens };
+      }
+    } catch {
+      // 2. Yönteme geç
     }
-    return { history, fens };
-  } catch {
-    return { history: [], fens: [new Chess().fen()] };
+
+    // 2. Yöntem: Saat/Eval yorumlarını ({[%clk ...]}), NAG işaretlerini ($1) ve başlıkları soyup manuel SAN oynat
+    try {
+      const bodyOnly = pgn
+        .replace(/\[[^\]]*\]/g, ' ')
+        .replace(/\{[^}]*\}/g, ' ')
+        .replace(/\([^)]*\)/g, ' ')
+        .replace(/\$\d+/g, ' ')
+        .replace(/\d+\.(\.\.)?/g, ' ')
+        .replace(/(1-0|0-1|1\/2-1\/2|\*)/g, ' ')
+        .trim();
+
+      const tokens = bodyOnly.split(/\s+/).filter(Boolean);
+      const replay = new Chess();
+      const fens = [replay.fen()];
+      for (const tok of tokens) {
+        const cleanTok = tok.replace(/[?!+#]+$/g, '');
+        try {
+          const m = replay.move(tok) || replay.move(cleanTok);
+          if (m) fens.push(replay.fen());
+        } catch {
+          break;
+        }
+      }
+      const history = replay.history({ verbose: true });
+      if (history.length > 0) {
+        return { history, fens };
+      }
+    } catch {
+      // 3. Yönteme geç
+    }
   }
+
+  // 3. Yöntem: Lichess'in düz "moves" string'i ("e4 e5 Nf3 Nc6 ...") üzerinden oynat
+  if (rawMovesStr) {
+    try {
+      const tokens = rawMovesStr.trim().split(/\s+/).filter(Boolean);
+      const replay = new Chess();
+      const fens = [replay.fen()];
+      for (const tok of tokens) {
+        const m = replay.move(tok);
+        if (m) fens.push(replay.fen());
+      }
+      const history = replay.history({ verbose: true });
+      if (history.length > 0) {
+        return { history, fens };
+      }
+    } catch {
+      // fallback
+    }
+  }
+
+  return { history: [], fens: [new Chess().fen()] };
 }
 
 // ============================================================================
-// 1. CHESS.COM TÜM ARŞİVLERİNDEN MAÇ ÇEKİCİ
+// 1. CHESS.COM TÜM ARŞİVLERİNDEN MAÇ ÇEKİCİ (Rakip İsmi + PGN Başlık Yedekli)
 // ============================================================================
 export async function fetchChessComGames(username, maxGames = 150, onProgress = null) {
   const cleanUser = username.trim().toLowerCase();
@@ -145,7 +217,7 @@ export async function fetchChessComGames(username, maxGames = 150, onProgress = 
   }
 
   const archivesData = await archivesRes.json();
-  const archives = (archivesData.archives || []).slice().reverse(); // En yeni aydan geriye doğru
+  const archives = (archivesData.archives || []).slice().reverse();
 
   if (archives.length === 0) {
     throw new Error('Bu Chess.com hesabında henüz tamamlanmış maç arşivi bulunamadı.');
@@ -161,7 +233,7 @@ export async function fetchChessComGames(username, maxGames = 150, onProgress = 
         stage: 'fetch',
         loaded: collectedGames.length,
         totalTarget: maxGames,
-        message: `Chess.com arşivi taranıyor (${ archiveUrl.split('/').slice(-2).join('/') })...`,
+        message: `Chess.com arşivi taranıyor (${archiveUrl.split('/').slice(-2).join('/')})...`,
       });
     }
 
@@ -173,26 +245,48 @@ export async function fetchChessComGames(username, maxGames = 150, onProgress = 
 
       for (const g of games) {
         if (collectedGames.length >= maxGames) break;
-        if (g.rules && g.rules !== 'chess') continue; // Sadece standart 8x8 satranç
+        if (g.rules && g.rules !== 'chess') continue;
         if (!g.pgn) continue;
 
-        const isWhite =
-          g.white?.username?.toLowerCase() === cleanUser;
+        // Beyaz ve Siyah kullanıcı adlarını hem JSON objesinden hem PGN [White "..."] / [Black "..."] etiketinden çıkar
+        const whiteName =
+          g.white?.username ||
+          extractPgnHeader(g.pgn, 'White') ||
+          (g.white?.['@id'] ? g.white['@id'].split('/').pop() : '') ||
+          'Beyaz Oyuncu';
+        const blackName =
+          g.black?.username ||
+          extractPgnHeader(g.pgn, 'Black') ||
+          (g.black?.['@id'] ? g.black['@id'].split('/').pop() : '') ||
+          'Siyah Oyuncu';
+
+        const whiteRating =
+          g.white?.rating || extractPgnHeader(g.pgn, 'WhiteElo') || '-';
+        const blackRating =
+          g.black?.rating || extractPgnHeader(g.pgn, 'BlackElo') || '-';
+
+        const isWhite = whiteName.toLowerCase() === cleanUser;
         const userSide = isWhite ? 'w' : 'b';
         const userObj = isWhite ? g.white : g.black;
-        const oppObj = isWhite ? g.black : g.white;
+
+        const userDisplayName = isWhite ? whiteName : blackName;
+        const opponentDisplayName = isWhite ? blackName : whiteName;
+        const userElo = isWhite ? whiteRating : blackRating;
+        const opponentElo = isWhite ? blackRating : whiteRating;
 
         const outcome = normalizeChessComOutcome(userObj?.result);
         const ecoCode = extractPgnHeader(g.pgn, 'ECO') || 'A00';
-        const openingName = cleanChessComOpeningUrl(g.eco || extractPgnHeader(g.pgn, 'ECOUrl'), g.pgn);
+        const openingName = cleanChessComOpeningUrl(
+          g.eco || extractPgnHeader(g.pgn, 'ECOUrl'),
+          g.pgn
+        );
         const endTimeMs = (g.end_time || 0) * 1000;
         const dateStr = endTimeMs
           ? new Date(endTimeMs).toLocaleDateString('tr-TR')
           : extractPgnHeader(g.pgn, 'Date') || '-';
 
-        // Hamle sayısını PGN'den hızlıca tahmin et (bellek dostu)
-        const moveNums = g.pgn.match(/\b(\d+)\.\s+[a-zA-Z]/g);
-        const totalMoves = moveNums ? moveNums.length : 0;
+        const moveNums = g.pgn.match(/\b(\d+)\.\s*[^\s]/g);
+        const totalMoves = moveNums ? moveNums.length : 10;
         if (totalMoves < 2) continue;
 
         collectedGames.push({
@@ -203,17 +297,23 @@ export async function fetchChessComGames(username, maxGames = 150, onProgress = 
           timestamp: endTimeMs,
           timeClass: g.time_class || 'blitz',
           userColor: userSide,
-          userRating: userObj?.rating || '-',
-          opponentName: oppObj?.username || 'Rakip',
-          opponentRating: oppObj?.rating || '-',
-          outcome, // 'win' | 'draw' | 'loss'
+          userName: userDisplayName,
+          userRating: userElo,
+          whiteName,
+          whiteRating,
+          blackName,
+          blackRating,
+          opponentName: opponentDisplayName,
+          opponentRating: opponentElo,
+          outcome,
           termination: userObj?.result || '',
           eco: ecoCode,
           openingName,
           totalMoves,
           reachedEndgame: totalMoves >= 32,
           pgn: g.pgn,
-          deepAnalysis: null, // Stockfish derin analiz yapıldığında doldurulur
+          movesStr: '',
+          deepAnalysis: null,
         });
       }
     } catch {
@@ -229,7 +329,7 @@ export async function fetchChessComGames(username, maxGames = 150, onProgress = 
 }
 
 // ============================================================================
-// 2. LICHESS.ORG NDJSON STREAM API MAÇ ÇEKİCİ
+// 2. LICHESS.ORG NDJSON STREAM API MAÇ ÇEKİCİ (Rakip İsmi + Bot/Anonim + PGN Yedekli)
 // ============================================================================
 export async function fetchLichessGames(username, maxGames = 150, onProgress = null) {
   const cleanUser = username.trim();
@@ -237,7 +337,7 @@ export async function fetchLichessGames(username, maxGames = 150, onProgress = n
 
   const url = `https://lichess.org/api/games/user/${encodeURIComponent(
     cleanUser
-  )}?max=${maxGames}&opening=true&pgnInJson=true&perfType=ultraBullet,bullet,blitz,rapid,classical,correspondence`;
+  )}?max=${maxGames}&opening=true&pgnInJson=true`;
 
   if (onProgress) {
     onProgress({
@@ -276,10 +376,45 @@ export async function fetchLichessGames(username, maxGames = 150, onProgress = n
       if (g.variant && g.variant !== 'standard') continue;
       if (!g.pgn && !g.moves) continue;
 
-      const whiteUser = g.players?.white?.user?.name || g.players?.white?.user?.id || 'Beyaz';
-      const blackUser = g.players?.black?.user?.name || g.players?.black?.user?.id || 'Siyah';
-      const isWhite = whiteUser.toLowerCase() === lowerUser;
+      const pgnWhite = extractPgnHeader(g.pgn, 'White');
+      const pgnBlack = extractPgnHeader(g.pgn, 'Black');
+
+      const whiteName =
+        g.players?.white?.user?.name ||
+        g.players?.white?.user?.id ||
+        (g.players?.white?.aiLevel
+          ? `Stockfish Seviye ${g.players.white.aiLevel}`
+          : '') ||
+        (pgnWhite && pgnWhite !== '?' ? pgnWhite : '') ||
+        'Anonim (Beyaz)';
+
+      const blackName =
+        g.players?.black?.user?.name ||
+        g.players?.black?.user?.id ||
+        (g.players?.black?.aiLevel
+          ? `Stockfish Seviye ${g.players.black.aiLevel}`
+          : '') ||
+        (pgnBlack && pgnBlack !== '?' ? pgnBlack : '') ||
+        'Anonim (Siyah)';
+
+      const whiteRating =
+        g.players?.white?.rating ||
+        extractPgnHeader(g.pgn, 'WhiteElo') ||
+        '-';
+      const blackRating =
+        g.players?.black?.rating ||
+        extractPgnHeader(g.pgn, 'BlackElo') ||
+        '-';
+
+      const isWhite =
+        whiteName.toLowerCase() === lowerUser ||
+        g.players?.white?.user?.id?.toLowerCase() === lowerUser;
       const userSide = isWhite ? 'w' : 'b';
+
+      const userDisplayName = isWhite ? whiteName : blackName;
+      const opponentDisplayName = isWhite ? blackName : whiteName;
+      const userElo = isWhite ? whiteRating : blackRating;
+      const opponentElo = isWhite ? blackRating : whiteRating;
 
       let outcome = 'draw';
       if (g.winner) {
@@ -290,17 +425,19 @@ export async function fetchLichessGames(username, maxGames = 150, onProgress = n
       }
 
       const movesArr = (g.moves || '').trim().split(/\s+/).filter(Boolean);
-      const totalMoves = Math.ceil(movesArr.length / 2);
+      const totalMoves =
+        movesArr.length > 0
+          ? Math.ceil(movesArr.length / 2)
+          : (g.pgn?.match(/\b(\d+)\.\s*[^\s]/g) || []).length;
       if (totalMoves < 2) continue;
 
       const ecoCode = g.opening?.eco || extractPgnHeader(g.pgn, 'ECO') || 'A00';
       const gmDetected = detectOpeningAndVariation(movesArr.slice(0, 18));
-      const openingName =
-        g.opening?.name
-          ? `${ecoCode} • ${g.opening.name}`
-          : gmDetected
-          ? gmDetected.fullTitle
-          : cleanChessComOpeningUrl('', g.pgn || '');
+      const openingName = g.opening?.name
+        ? `${ecoCode} • ${g.opening.name}`
+        : gmDetected
+        ? gmDetected.fullTitle
+        : cleanChessComOpeningUrl('', g.pgn || '', movesArr);
 
       const createdAt = g.createdAt || Date.now();
       const dateStr = new Date(createdAt).toLocaleDateString('tr-TR');
@@ -313,13 +450,14 @@ export async function fetchLichessGames(username, maxGames = 150, onProgress = n
         timestamp: createdAt,
         timeClass: g.speed || 'blitz',
         userColor: userSide,
-        userRating: isWhite
-          ? g.players?.white?.rating || '-'
-          : g.players?.black?.rating || '-',
-        opponentName: isWhite ? blackUser : whiteUser,
-        opponentRating: isWhite
-          ? g.players?.black?.rating || '-'
-          : g.players?.white?.rating || '-',
+        userName: userDisplayName,
+        userRating: userElo,
+        whiteName,
+        whiteRating,
+        blackName,
+        blackRating,
+        opponentName: opponentDisplayName,
+        opponentRating: opponentElo,
         outcome,
         termination: g.status || '',
         eco: ecoCode,
@@ -327,6 +465,7 @@ export async function fetchLichessGames(username, maxGames = 150, onProgress = n
         totalMoves,
         reachedEndgame: totalMoves >= 32,
         pgn: g.pgn || '',
+        movesStr: g.moves || '',
         deepAnalysis: null,
       });
     } catch {
@@ -384,9 +523,9 @@ export function aggregateAccountStats(games = []) {
       overallAccuracy: null,
       whiteAccuracy: null,
       blackAccuracy: null,
-      openingAccuracy: null, // Hamle 1-10
-      middlegameAccuracy: null, // Hamle 11-28 (Taktik & Oyun Ortası)
-      endgameAccuracy: null, // Hamle 29+ (Oyun Sonu)
+      openingAccuracy: null,
+      middlegameAccuracy: null,
+      endgameAccuracy: null,
       tacticalSharpnessScore: null,
       blundersPerGame: null,
     },
@@ -403,7 +542,6 @@ export function aggregateAccountStats(games = []) {
   let totalBlunders = 0;
 
   for (const g of games) {
-    // Genel sonuç
     if (g.outcome === 'win') summary.overall.wins++;
     else if (g.outcome === 'draw') summary.overall.draws++;
     else summary.overall.losses++;
@@ -414,7 +552,6 @@ export function aggregateAccountStats(games = []) {
     else if (g.outcome === 'draw') sideBucket.draws++;
     else sideBucket.losses++;
 
-    // Açılış istatistiği (Renk bazlı)
     const opKey = g.openingName || 'Diğer Açılış';
     if (!sideBucket.openingsMap[opKey]) {
       sideBucket.openingsMap[opKey] = {
@@ -438,7 +575,6 @@ export function aggregateAccountStats(games = []) {
     else opEntry.losses++;
     opEntry.gameIds.push(g.id);
 
-    // Oyun Sonu (32+ hamle süren maçlardaki dönüşüm başarısı)
     if (g.reachedEndgame) {
       summary.endgameStats.totalEndgames++;
       if (g.outcome === 'win') summary.endgameStats.wins++;
@@ -450,7 +586,6 @@ export function aggregateAccountStats(games = []) {
       else if (g.outcome === 'loss') summary.shortTacticalGames.losses++;
     }
 
-    // Eğer bu maça Stockfish derin faz analizi yapıldıysa
     if (g.deepAnalysis) {
       summary.stockfishAggregate.analyzedCount++;
       accAll.push(g.deepAnalysis.userAccuracy);
@@ -472,7 +607,8 @@ export function aggregateAccountStats(games = []) {
     }
   }
 
-  const pct = (part, total) => (total > 0 ? Math.round((part / total) * 1000) / 10 : 0);
+  const pct = (part, total) =>
+    total > 0 ? Math.round((part / total) * 1000) / 10 : 0;
   const avg = (arr) =>
     arr.length > 0
       ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10
@@ -510,13 +646,20 @@ export function aggregateAccountStats(games = []) {
     summary.stockfishAggregate.middlegameAccuracy = avg(accMiddlegame);
     summary.stockfishAggregate.endgameAccuracy = avg(accEndgame);
     summary.stockfishAggregate.blundersPerGame =
-      Math.round((totalBlunders / summary.stockfishAggregate.analyzedCount) * 10) / 10;
+      Math.round(
+        (totalBlunders / summary.stockfishAggregate.analyzedCount) * 10
+      ) / 10;
 
-    // Taktik keskinlik puanı: oyun ortası doğruluğu ve düşük büyük hata oranının birleşimi
-    const mgBase = summary.stockfishAggregate.middlegameAccuracy ?? summary.stockfishAggregate.overallAccuracy ?? 75;
+    const mgBase =
+      summary.stockfishAggregate.middlegameAccuracy ??
+      summary.stockfishAggregate.overallAccuracy ??
+      75;
     summary.stockfishAggregate.tacticalSharpnessScore = Math.max(
       0,
-      Math.min(100, Math.round(mgBase - summary.stockfishAggregate.blundersPerGame * 3.5))
+      Math.min(
+        100,
+        Math.round(mgBase - summary.stockfishAggregate.blundersPerGame * 3.5)
+      )
     );
   }
 
@@ -526,39 +669,64 @@ export function aggregateAccountStats(games = []) {
 // ============================================================================
 // 4. TEK BİR MAÇ İÇİN HIZLI STOCKFISH FAZ ANALİZÖRÜ (AÇILIŞ / TAKTİK / OYUN SONU)
 // ============================================================================
-export async function analyzeSingleGamePhasesWithStockfish(gameItem, stockfishController) {
-  if (!gameItem || !gameItem.pgn || !stockfishController) return null;
+export async function analyzeSingleGamePhasesWithStockfish(
+  gameItem,
+  stockfishController
+) {
+  if (!gameItem || !stockfishController) return null;
 
-  const { history, fens } = parseGameMovesAndTimeline(gameItem.pgn);
+  const { history, fens } = parseGameMovesAndTimeline(
+    gameItem.pgn,
+    gameItem.movesStr
+  );
   if (history.length < 4) return null;
 
-  // Bellek ve hız optimizasyonu: kullanıcının oynadığı hamlelerin öncesi ve sonrası konumları değerlendir
-  const userColor = gameItem.userColor;
-  const openingAccs = []; // Hamle 1..10 (ply 0..19)
-  const middlegameAccs = []; // Hamle 11..28 (ply 20..55)
-  const endgameAccs = []; // Hamle 29+ (ply 56+)
+  const userColor = gameItem.userColor || 'w';
+  const openingAccs = []; // Hamle 1..10
+  const middlegameAccs = []; // Hamle 11..28
+  const endgameAccs = []; // Hamle 29+
   const allUserAccs = [];
 
   let blunders = 0;
   let mistakes = 0;
+  let inaccuracies = 0;
   let bestMoves = 0;
 
-  // Hızlı toplu tarama için kullanıcının hamlelerini örnekle (uzun maçlarda her kullanıcı hamlesini hızlı depth 8 / 65ms ile tara)
   const evalCache = {};
 
   const getQuickEval = async (plyIdx) => {
     if (evalCache[plyIdx]) return evalCache[plyIdx];
     const fenStr = fens[plyIdx];
     const turnColor = fenStr.split(' ')[1] || 'w';
+
+    // Mat veya pat olmuş son konum kontrolü
+    const tempCheck = new Chess(fenStr);
+    if (tempCheck.isCheckmate()) {
+      const matedColor = tempCheck.turn();
+      const mateObj = {
+        type: 'mate',
+        value: matedColor === 'w' ? -1 : 1,
+        bestMove: null,
+      };
+      evalCache[plyIdx] = mateObj;
+      return mateObj;
+    }
+    if (tempCheck.isDraw() || tempCheck.isStalemate()) {
+      const drawObj = { type: 'cp', value: 0, bestMove: null };
+      evalCache[plyIdx] = drawObj;
+      return drawObj;
+    }
+
+    // movetime koymadan doğrudan depth 7 ile bekle ki her pozisyonda %100 gerçek cp skoru ve bestMove dönsün
     const res = await stockfishController.analyzePosition(fenStr, turnColor, {
-      depth: 8,
+      depth: 7,
       multiPV: 1,
-      movetime: 55,
+      movetime: 0,
     });
     const line = res?.lines?.[0];
     const evalObj = {
       type: line?.type || 'cp',
-      value: line?.value ?? 0,
+      value: typeof line?.value === 'number' ? line.value : 0,
       bestMove: res?.bestMove || line?.bestMove || null,
     };
     evalCache[plyIdx] = evalObj;
@@ -583,6 +751,7 @@ export async function analyzeSingleGamePhasesWithStockfish(gameItem, stockfishCo
 
     allUserAccs.push(clsResult.accuracy);
     if (clsResult.classification === 'best') bestMoves++;
+    else if (clsResult.classification === 'inaccuracy') inaccuracies++;
     else if (clsResult.classification === 'mistake') mistakes++;
     else if (clsResult.classification === 'blunder') blunders++;
 
@@ -607,6 +776,7 @@ export async function analyzeSingleGamePhasesWithStockfish(gameItem, stockfishCo
     middlegameAccuracy: avg(middlegameAccs),
     endgameAccuracy: avg(endgameAccs),
     bestMoves,
+    inaccuracies,
     mistakes,
     blunders,
   };

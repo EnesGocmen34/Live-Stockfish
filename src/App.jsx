@@ -30,6 +30,7 @@ import {
   Swords,
   Lock,
   BarChart3,
+  Settings,
 } from 'lucide-react';
 import ChessBoard, { BOARD_THEMES } from './components/ChessBoard.jsx';
 import ChessPiece from './components/ChessPieces.jsx';
@@ -269,6 +270,8 @@ export default function App() {
   const [reviewProgress, setReviewProgress] = useState(0);
   const [gameReviewData, setGameReviewData] = useState(null);
   const [showReviewArrows, setShowReviewArrows] = useState(true);
+  // Chess.com / Lichess'ten içe aktarılan maçın gerçek oyuncu bilgileri
+  const [importedGameMeta, setImportedGameMeta] = useState(null);
 
   // --- 2. STOCKFISH ANALİZ STÜDYOSU & TAHTA YAPICI STATE'LERİ ---
   const analysisGameRef = useRef(new Chess());
@@ -283,6 +286,16 @@ export default function App() {
   const [liveAnalysisLines, setLiveAnalysisLines] = useState([]);
   const [liveMastersOpeningData, setLiveMastersOpeningData] = useState(null);
   const [evalScore, setEvalScore] = useState({ type: 'cp', value: 0.2, depth: 12 });
+
+  // Lichess Tarzı Özelleştirilebilir Stockfish Analiz Motoru Ayarları
+  const [engineEnabled, setEngineEnabled] = useState(true);
+  const [showEngineSettings, setShowEngineSettings] = useState(false);
+  const [engineVariantName, setEngineVariantName] = useState('Stockfish 19 · 1MB NNUE');
+  const [analysisSearchTimeSec, setAnalysisSearchTimeSec] = useState(4); // 1s .. 15s
+  const [analysisMaxDepth, setAnalysisMaxDepth] = useState(18); // 8 .. 25
+  const [analysisMultiPV, setAnalysisMultiPV] = useState(3); // 1 .. 5 (Çoklu varyantlar)
+  const [analysisThreadsSkill, setAnalysisThreadsSkill] = useState(20); // 1 .. 20
+  const [analysisHashMb, setAnalysisHashMb] = useState(16); // 16MB .. 128MB
 
   // Tahta Yapıcı (Board Editor)
   const [isBoardEditorOpen, setIsBoardEditorOpen] = useState(false);
@@ -328,23 +341,35 @@ export default function App() {
   const isViewingPastMove = activePlayPly < moveHistory.length;
   const displayedPlayFen = fenTimeline[activePlayPly] || fen;
 
-  // Analiz modunda veya Maç Sonu İnceleme modunda ilgili konumu Stockfish ile canlı analiz et
+  // Analiz modunda veya Maç Sonu İnceleme modunda ilgili konumu kullanıcının Lichess motor ayarlarıyla (Derinlik, MultiPV 1-5, Arama Süresi, Hafıza) canlı analiz et
   useEffect(() => {
     if (!engineRef.current || !engineReady) return;
+    if (!engineEnabled) {
+      engineRef.current.stop();
+      return;
+    }
 
     if (appMode === 'analysis' && !isBoardEditorOpen) {
       const turnColor = analysisFen.split(' ')[1] || 'w';
       engineRef.current.analyzePosition(analysisFen, turnColor, {
-        depth: 15,
-        multiPV: 3,
-        movetime: 650,
+        depth: analysisMaxDepth,
+        multiPV: analysisMultiPV,
+        movetime: analysisSearchTimeSec * 1000,
+        skillLevel: analysisThreadsSkill,
+        hashMb: analysisHashMb,
       });
-    } else if (appMode === 'play' && (gameOverState.isOver || isReviewingGame) && !isAnalyzingFullGame) {
+    } else if (
+      appMode === 'play' &&
+      (gameOverState.isOver || isReviewingGame) &&
+      !isAnalyzingFullGame
+    ) {
       const turnColor = displayedPlayFen.split(' ')[1] || 'w';
       engineRef.current.analyzePosition(displayedPlayFen, turnColor, {
-        depth: 14,
-        multiPV: 2,
-        movetime: 500,
+        depth: analysisMaxDepth,
+        multiPV: analysisMultiPV,
+        movetime: analysisSearchTimeSec * 1000,
+        skillLevel: analysisThreadsSkill,
+        hashMb: analysisHashMb,
       });
     }
   }, [
@@ -356,6 +381,12 @@ export default function App() {
     isReviewingGame,
     isAnalyzingFullGame,
     engineReady,
+    engineEnabled,
+    analysisMaxDepth,
+    analysisMultiPV,
+    analysisSearchTimeSec,
+    analysisThreadsSkill,
+    analysisHashMb,
   ]);
 
   // Hamle listesi güncellendiğinde en alta kaydır
@@ -396,100 +427,138 @@ export default function App() {
   );
 
   // --- MAÇ SONU TAM DOĞRULUK ANALİZİ (GAME REVIEW) ---
-  const runFullGameAccuracyReview = useCallback(async () => {
-    if (!engineRef.current || moveHistory.length === 0 || isAnalyzingFullGame) return;
+  const runFullGameAccuracyReview = useCallback(
+    async (customFens = null, customMoves = null) => {
+      const fens = customFens || [...fenTimeline];
+      const moves = customMoves || [...moveHistory];
+      if (!engineRef.current || moves.length === 0 || isAnalyzingFullGame) return;
 
-    setIsReviewingGame(true);
-    setDismissGameOverModal(true);
-    setIsAnalyzingFullGame(true);
-    setReviewProgress(0);
+      setIsReviewingGame(true);
+      setDismissGameOverModal(true);
+      setIsAnalyzingFullGame(true);
+      setReviewProgress(0);
 
-    const fens = [...fenTimeline];
-    const moves = [...moveHistory];
-    const posEvals = [];
+      const posEvals = [];
 
-    // Her pozisyonu hızlıca değerlendir
-    for (let i = 0; i < fens.length; i++) {
-      const f = fens[i];
-      const turnColor = f.split(' ')[1] || 'w';
-      const res = await engineRef.current.analyzePosition(f, turnColor, {
-        depth: 10,
-        multiPV: 1,
-        movetime: 170,
+      // Her pozisyonu %100 senkronize (isready bariyerli) depth 8 ile değerlendir
+      for (let i = 0; i < fens.length; i++) {
+        const f = fens[i];
+        const turnColor = f.split(' ')[1] || 'w';
+
+        const tempCheck = new Chess(f);
+        if (tempCheck.isCheckmate()) {
+          const matedColor = tempCheck.turn();
+          posEvals.push({
+            type: 'mate',
+            value: matedColor === 'w' ? -1 : 1,
+            bestMove: null,
+          });
+          setReviewProgress(Math.round(((i + 1) / fens.length) * 100));
+          continue;
+        }
+        if (tempCheck.isDraw() || tempCheck.isStalemate()) {
+          posEvals.push({
+            type: 'cp',
+            value: 0,
+            bestMove: null,
+          });
+          setReviewProgress(Math.round(((i + 1) / fens.length) * 100));
+          continue;
+        }
+
+        const res = await engineRef.current.analyzePosition(f, turnColor, {
+          depth: 8,
+          multiPV: 1,
+          movetime: 0,
+        });
+
+        const primary =
+          res && res.lines && res.lines[0]
+            ? res.lines[0]
+            : { type: 'cp', value: 0, bestMove: res?.bestMove || null };
+
+        posEvals.push({
+          type: primary.type || 'cp',
+          value: typeof primary.value === 'number' ? primary.value : 0,
+          bestMove: res?.bestMove || primary.bestMove || null,
+        });
+
+        setReviewProgress(Math.round(((i + 1) / fens.length) * 100));
+      }
+
+      // Her hamleyi sınıflandır ve Beyaz/Siyah doğruluk ortalamalarını çıkar
+      const moveAnalyses = [];
+      const whiteAccList = [];
+      const blackAccList = [];
+      const counts = {
+        w: {
+          best: 0,
+          excellent: 0,
+          good: 0,
+          inaccuracy: 0,
+          mistake: 0,
+          blunder: 0,
+        },
+        b: {
+          best: 0,
+          excellent: 0,
+          good: 0,
+          inaccuracy: 0,
+          mistake: 0,
+          blunder: 0,
+        },
+      };
+
+      for (let i = 0; i < moves.length; i++) {
+        const m = moves[i];
+        const prevEval = posEvals[i];
+        const nextEval = posEvals[i + 1] || prevEval;
+        const playedUci = `${m.from}${m.to}${m.promotion || ''}`;
+        const engineBestUci = prevEval?.bestMove || null;
+
+        const result = classifyMoveFromEvalDrop(
+          prevEval,
+          nextEval,
+          m.color,
+          playedUci,
+          engineBestUci
+        );
+
+        counts[m.color][result.classification]++;
+        if (m.color === 'w') whiteAccList.push(result.accuracy);
+        else blackAccList.push(result.accuracy);
+
+        moveAnalyses.push({
+          ply: i + 1,
+          san: m.san,
+          color: m.color,
+          from: m.from,
+          to: m.to,
+          playedUci,
+          bestMoveUci: engineBestUci,
+          classification: result.classification,
+          accuracy: Math.round(result.accuracy),
+          evalAfter: nextEval,
+        });
+      }
+
+      const avg = (arr) =>
+        arr.length === 0
+          ? 75
+          : Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10;
+
+      setGameReviewData({
+        whiteAccuracy: avg(whiteAccList),
+        blackAccuracy: avg(blackAccList),
+        counts,
+        moveAnalyses,
+        posEvals,
       });
 
-      const primary = res && res.lines && res.lines[0]
-        ? res.lines[0]
-        : { type: 'cp', value: 0, bestMove: res?.bestMove || null };
-
-      posEvals.push({
-        type: primary.type || 'cp',
-        value: primary.value ?? 0,
-        bestMove: res?.bestMove || primary.bestMove || null,
-      });
-
-      setReviewProgress(Math.round(((i + 1) / fens.length) * 100));
-    }
-
-    // Her hamleyi sınıflandır ve Beyaz/Siyah doğruluk ortalamalarını çıkar
-    const moveAnalyses = [];
-    const whiteAccList = [];
-    const blackAccList = [];
-    const counts = {
-      w: { best: 0, excellent: 0, good: 0, inaccuracy: 0, mistake: 0, blunder: 0 },
-      b: { best: 0, excellent: 0, good: 0, inaccuracy: 0, mistake: 0, blunder: 0 },
-    };
-
-    for (let i = 0; i < moves.length; i++) {
-      const m = moves[i];
-      const prevEval = posEvals[i];
-      const nextEval = posEvals[i + 1] || prevEval;
-      const playedUci = `${m.from}${m.to}${m.promotion || ''}`;
-      const engineBestUci = prevEval?.bestMove || null;
-
-      const result = classifyMoveFromEvalDrop(
-        prevEval,
-        nextEval,
-        m.color,
-        playedUci,
-        engineBestUci
-      );
-
-      counts[m.color][result.classification]++;
-      if (m.color === 'w') whiteAccList.push(result.accuracy);
-      else blackAccList.push(result.accuracy);
-
-      moveAnalyses.push({
-        ply: i + 1,
-        san: m.san,
-        color: m.color,
-        from: m.from,
-        to: m.to,
-        playedUci,
-        bestMoveUci: engineBestUci,
-        classification: result.classification,
-        accuracy: Math.round(result.accuracy),
-        evalAfter: nextEval,
-      });
-    }
-
-    const avg = (arr) =>
-      arr.length === 0
-        ? 100
-        : Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10;
-
-    setGameReviewData({
-      whiteAccuracy: avg(whiteAccList),
-      blackAccuracy: avg(blackAccList),
-      counts,
-      moveAnalyses,
-      posEvals,
-    });
-
-    setIsAnalyzingFullGame(false);
-    // Analiz bitince kullanıcıyı son hamleye veya ilk hataya odakla
-    setViewingPly(moves.length);
-  }, [fenTimeline, moveHistory, isAnalyzingFullGame]);
+      setIsAnalyzingFullGame(false);
+    },
+    [fenTimeline, moveHistory, isAnalyzingFullGame]
+  );
 
   // Bot Hamlesini Tetikle
   const triggerBotMove = useCallback(
@@ -563,10 +632,10 @@ export default function App() {
     [appMode, triggerSoundForMove]
   );
 
-  // Sıra Botta ise Otomatik Oynat
+  // Sıra Botta ise Otomatik Oynat (İçe aktarılmış inceleme maçında bot hamle yapmaz!)
   useEffect(() => {
     if (appMode !== 'play') return;
-    if (gameOverState.isOver) {
+    if (gameOverState.isOver || isReviewingGame || importedGameMeta) {
       setIsBotThinking(false);
       return;
     }
@@ -574,7 +643,16 @@ export default function App() {
     if (currentTurn !== playerColor) {
       triggerBotMove(fen, botElo, currentTurn);
     }
-  }, [appMode, fen, playerColor, botElo, gameOverState.isOver, triggerBotMove]);
+  }, [
+    appMode,
+    fen,
+    playerColor,
+    botElo,
+    gameOverState.isOver,
+    isReviewingGame,
+    importedGameMeta,
+    triggerBotMove,
+  ]);
 
   // Oyuncu Hamlesini Uygula (Maç Modu)
   const attemptPlayerMove = (fromSquare, toSquare, explicitPromotion = null) => {
@@ -732,6 +810,7 @@ export default function App() {
     }
 
     analysisGameRef.current = fresh;
+    setImportedGameMeta(null);
     setIsBoardEditorOpen(false);
     setAnalysisTimeline(timeline);
     setAnalysisHistory(hist);
@@ -743,18 +822,28 @@ export default function App() {
 
   // Chess.com / Lichess Hesap Analizinden Seçilen Bir Maçı Doğrudan Serbest Analiz Stüdyosunda Aç
   const handleOpenImportedGameInAnalysis = (gameItem) => {
-    if (!gameItem || !gameItem.pgn) return;
-    const { history, fens } = parseGameMovesAndTimeline(gameItem.pgn);
+    if (!gameItem) return;
+    const { history, fens } = parseGameMovesAndTimeline(
+      gameItem.pgn,
+      gameItem.movesStr
+    );
     if (fens.length === 0) return;
 
     const loaded = new Chess();
     try {
-      loaded.load(fens[fens.length - 1]);
+      loaded.load(fens[0]);
     } catch {
       // ignore
     }
 
     analysisGameRef.current = loaded;
+    setImportedGameMeta({
+      whiteName: gameItem.whiteName || 'Beyaz',
+      whiteRating: gameItem.whiteRating || '-',
+      blackName: gameItem.blackName || 'Siyah',
+      blackRating: gameItem.blackRating || '-',
+      openingName: gameItem.openingName,
+    });
     setOrientation(gameItem.userColor || 'w');
     setIsBoardEditorOpen(false);
     setAnalysisTimeline(fens);
@@ -766,33 +855,38 @@ export default function App() {
     soundEngine.playMove();
   };
 
-  // Chess.com / Lichess Hesap Analizinden Seçilen Bir Maçı Hamle Hamle Doğruluk İnceleme (Game Review) Modunda Aç
+  // Chess.com / Lichess Hesap Analizinden Seçilen Bir Maçı Hamle Hamle Doğruluk İnceleme (Game Review) Modunda Aç ve Analizi Otomatik Başlat
   const handleOpenImportedGameInFullReview = (gameItem) => {
-    if (!gameItem || !gameItem.pgn) return;
+    if (!gameItem) return;
     if (botTimeoutRef.current) clearTimeout(botTimeoutRef.current);
     if (engineRef.current) engineRef.current.stop();
     setIsBotThinking(false);
 
-    const { history, fens } = parseGameMovesAndTimeline(gameItem.pgn);
+    const { history, fens } = parseGameMovesAndTimeline(
+      gameItem.pgn,
+      gameItem.movesStr
+    );
     if (history.length === 0) return;
 
-    const loaded = new Chess();
-    try {
-      loaded.loadPgn(gameItem.pgn);
-    } catch {
-      // ignore
-    }
+    const finalFen = fens[fens.length - 1];
+    const loaded = new Chess(finalFen);
 
     gameRef.current = loaded;
-    const finalFen = fens[fens.length - 1];
     const lastM = history[history.length - 1];
 
+    setImportedGameMeta({
+      whiteName: gameItem.whiteName || 'Beyaz',
+      whiteRating: gameItem.whiteRating || '-',
+      blackName: gameItem.blackName || 'Siyah',
+      blackRating: gameItem.blackRating || '-',
+      openingName: gameItem.openingName,
+    });
     setPlayerColor(gameItem.userColor || 'w');
     setOrientation(gameItem.userColor || 'w');
     setFen(finalFen);
     setFenTimeline(fens);
     setMoveHistory(history);
-    setViewingPly(0);
+    setViewingPly(1);
     setLastMove(lastM ? { from: lastM.from, to: lastM.to } : null);
     setResignWinner(null);
     setIsReviewingGame(true);
@@ -800,6 +894,11 @@ export default function App() {
     setGameReviewData(null);
     setAppMode('play');
     soundEngine.playMove();
+
+    // Maç yüklendikten hemen sonra otomatik hamle hamle doğruluk & hata analizini başlat
+    setTimeout(() => {
+      runFullGameAccuracyReview(fens, history);
+    }, 80);
   };
 
   // Maçı Analiz Stüdyosuna Aktar
@@ -915,6 +1014,7 @@ export default function App() {
     setIsReviewingGame(false);
     setIsAnalyzingFullGame(false);
     setGameReviewData(null);
+    setImportedGameMeta(null);
     setEvalScore({ type: 'cp', value: 0.2, depth: 10 });
     soundEngine.playMove();
   };
@@ -1160,25 +1260,29 @@ export default function App() {
         }
       }
 
-      // Canlı motor okları (maç sonu serbest incelemede)
-      liveAnalysisLines.slice(0, 2).forEach((line, idx) => {
-        if (line.bestMove && line.bestMove.length >= 4) {
-          list.push({
-            from: line.bestMove.slice(0, 2),
-            to: line.bestMove.slice(2, 4),
-            color: idx === 0 ? '#629924' : '#3692e7',
-            opacity: idx === 0 ? 0.9 : 0.65,
-            strokeWidth: idx === 0 ? 2.5 : 1.9,
-          });
-        }
-      });
+      // Canlı motor okları (maç sonu serbest incelemede: seçilen Çoklu Varyant 1..5 sayısına göre)
+      if (engineEnabled) {
+        const arrowColors = ['#629924', '#3692e7', '#8ca2ad', '#b58863', '#9b59b6'];
+        liveAnalysisLines.slice(0, analysisMultiPV).forEach((line, idx) => {
+          if (line.bestMove && line.bestMove.length >= 4) {
+            list.push({
+              from: line.bestMove.slice(0, 2),
+              to: line.bestMove.slice(2, 4),
+              color: arrowColors[idx] || '#8ca2ad',
+              opacity: idx === 0 ? 0.92 : Math.max(0.45, 0.8 - idx * 0.12),
+              strokeWidth: idx === 0 ? 2.5 : 1.85,
+            });
+          }
+        });
+      }
       return list;
     }
 
     // 2) Analiz Stüdyosu Modu
     if (appMode === 'analysis' && !isBoardEditorOpen) {
-      if (showAnalysisArrows) {
-        liveAnalysisLines.slice(0, 3).forEach((line, idx) => {
+      if (showAnalysisArrows && engineEnabled) {
+        const arrowColors = ['#629924', '#3692e7', '#8ca2ad', '#b58863', '#9b59b6'];
+        liveAnalysisLines.slice(0, analysisMultiPV).forEach((line, idx) => {
           if (line.bestMove && line.bestMove.length >= 4) {
             const scoreText =
               line.type === 'mate'
@@ -1187,10 +1291,10 @@ export default function App() {
             list.push({
               from: line.bestMove.slice(0, 2),
               to: line.bestMove.slice(2, 4),
-              color: idx === 0 ? '#629924' : idx === 1 ? '#3692e7' : '#8ca2ad',
-              opacity: idx === 0 ? 0.92 : idx === 1 ? 0.72 : 0.55,
-              strokeWidth: idx === 0 ? 2.6 : 1.9,
-              label: idx === 0 ? scoreText : undefined,
+              color: arrowColors[idx] || '#8ca2ad',
+              opacity: idx === 0 ? 0.92 : Math.max(0.45, 0.8 - idx * 0.12),
+              strokeWidth: idx === 0 ? 2.6 : 1.85,
+              label: idx === 0 ? scoreText : `#${idx + 1}`,
             });
           }
         });
@@ -1229,6 +1333,8 @@ export default function App() {
     showAnalysisArrows,
     showOpeningArrows,
     currentOpeningBookMatch,
+    engineEnabled,
+    analysisMultiPV,
   ]);
 
   // Maç sonu incelemede kare üzerindeki kalite rozeti (★, !, ?!, ?, ??)
@@ -1375,7 +1481,11 @@ export default function App() {
           <div className="truncate">
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold text-white truncate">
-                {appMode === 'analysis'
+                {importedGameMeta
+                  ? barColor === 'w'
+                    ? `${importedGameMeta.whiteName} (${importedGameMeta.whiteRating})`
+                    : `${importedGameMeta.blackName} (${importedGameMeta.blackRating})`
+                  : appMode === 'analysis'
                   ? barColor === 'w'
                     ? 'Beyaz (Analiz)'
                     : 'Siyah (Analiz)'
@@ -1383,9 +1493,14 @@ export default function App() {
                   ? 'Stockfish Bot'
                   : 'Sen (Oyuncu)'}
               </span>
-              {appMode === 'play' && isBot && (
+              {appMode === 'play' && !importedGameMeta && isBot && (
                 <span className="px-1.5 py-0.5 text-[11px] font-bold rounded bg-[#3692e7]/20 text-[#3692e7] border border-[#3692e7]/40">
                   {botElo} ELO
+                </span>
+              )}
+              {importedGameMeta && (
+                <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-[#302e2c] text-[#bababa] border border-[#3c3934]">
+                  {barColor === 'w' ? 'Beyaz' : 'Siyah'}
                 </span>
               )}
               {accuracyForBar !== undefined && accuracyForBar !== null && (
@@ -1743,7 +1858,7 @@ export default function App() {
                         <div className="flex flex-col gap-2">
                           <button
                             type="button"
-                            onClick={runFullGameAccuracyReview}
+                            onClick={() => runFullGameAccuracyReview()}
                             className="w-full py-2.5 px-4 rounded bg-[#3692e7] hover:bg-[#48a1f2] text-white text-xs sm:text-sm font-bold shadow flex items-center justify-center gap-2 transition-colors"
                           >
                             <Award className="w-4 h-4" />
@@ -2044,33 +2159,240 @@ export default function App() {
             <>
               {/* MAÇ SONU DOĞRULUK RAPORU KARTI (GAME REVIEW) */}
               {(gameOverState.isOver || isReviewingGame) && (
-                <div className="bg-[#262421] border-2 border-[#3692e7] rounded-md p-4 shadow-xl flex flex-col gap-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Award className="w-4 h-4 text-[#3692e7]" />
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-white">
-                        Stockfish Maç Sonu Analizi
-                      </h3>
+                <div className="bg-[#262421] border-2 border-[#3692e7] rounded-md overflow-hidden shadow-xl flex flex-col">
+                  {/* Lichess Tarzı Üst Motor & Ayar Barı */}
+                  <div className="bg-[#1e1c19] border-b border-[#3692e7]/60 flex items-stretch justify-between">
+                    <div className="flex items-center gap-2.5 px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={() => setEngineEnabled((v) => !v)}
+                        className={`relative w-10 h-5.5 rounded-full transition-colors flex items-center px-0.5 border ${
+                          engineEnabled
+                            ? 'bg-[#629924] border-[#73b32b]'
+                            : 'bg-[#3c3934] border-[#555]'
+                        }`}
+                        title="Stockfish Motorunu Aç/Kapat"
+                      >
+                        <span
+                          className={`w-4 h-4 rounded-full bg-white shadow transform transition-transform flex items-center justify-center text-[9px] font-bold ${
+                            engineEnabled
+                              ? 'translate-x-4 text-[#629924]'
+                              : 'translate-x-0 text-[#777]'
+                          }`}
+                        >
+                          {engineEnabled ? '✓' : '✕'}
+                        </span>
+                      </button>
+                      <div className="leading-tight">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-bold text-white">
+                            SF 19 1MB
+                          </span>
+                          <span className="text-xs font-extrabold text-[#629924]">
+                            NNUE
+                          </span>
+                          <span className="text-[11px] font-mono text-[#72b8ff]">
+                            d={evalScore?.depth || analysisMaxDepth}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-[#999] block">
+                          yerel tarayıcı üzerinde • {analysisMultiPV}/5 varyant
+                        </span>
+                      </div>
                     </div>
 
-                    {/* Maç Sonu Okları Aç / Kapa */}
-                    <button
-                      type="button"
-                      onClick={() => setShowReviewArrows((v) => !v)}
-                      className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold border transition-colors ${
-                        showReviewArrows
-                          ? 'bg-[#629924]/25 border-[#629924] text-[#8cd936]'
-                          : 'bg-[#1e1c19] border-[#3c3934] text-[#999]'
-                      }`}
-                    >
-                      {showReviewArrows ? (
-                        <Eye className="w-3.5 h-3.5" />
-                      ) : (
-                        <EyeOff className="w-3.5 h-3.5" />
-                      )}
-                      <span>Oklar {showReviewArrows ? 'Açık' : 'Kapalı'}</span>
-                    </button>
+                    <div className="flex items-center">
+                      <button
+                        type="button"
+                        onClick={() => setShowReviewArrows((v) => !v)}
+                        className={`flex items-center gap-1 px-2.5 py-1 mr-2 rounded text-xs font-semibold border transition-colors ${
+                          showReviewArrows
+                            ? 'bg-[#629924]/25 border-[#629924] text-[#8cd936]'
+                            : 'bg-[#1e1c19] border-[#3c3934] text-[#999]'
+                        }`}
+                      >
+                        {showReviewArrows ? (
+                          <Eye className="w-3.5 h-3.5" />
+                        ) : (
+                          <EyeOff className="w-3.5 h-3.5" />
+                        )}
+                        <span>Oklar</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setShowEngineSettings((v) => !v)}
+                        className={`h-full px-3 flex items-center justify-center transition-colors ${
+                          showEngineSettings
+                            ? 'bg-[#1b78d0] text-white'
+                            : 'bg-[#262421] hover:bg-[#302e2c] text-[#bababa] border-l border-[#3c3934]'
+                        }`}
+                        title="Motor Ayarları (Arama süresi, Derinlik, Çoklu varyantlar 1-5)"
+                      >
+                        <Settings className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Dişli Çark Açıkken Lichess Motor Ayarları */}
+                  {showEngineSettings && (
+                    <div className="p-3.5 bg-[#22201d] border-b border-[#3692e7] flex flex-col gap-2.5 text-xs">
+                      <div className="grid grid-cols-12 items-center gap-2">
+                        <span className="col-span-4 text-[#bababa]">Motor</span>
+                        <div className="col-span-8">
+                          <select
+                            value={engineVariantName}
+                            onChange={(e) => setEngineVariantName(e.target.value)}
+                            className="w-full px-2 py-1 rounded bg-[#161512] border border-[#3692e7] text-white text-xs"
+                          >
+                            <option value="Stockfish 19 · 1MB NNUE">
+                              Stockfish 19 · 1MB NNUE
+                            </option>
+                            <option value="Stockfish 16 · 7MB NNUE">
+                              Stockfish 16 · 7MB NNUE
+                            </option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-12 items-center gap-2">
+                        <span className="col-span-4 text-[#bababa]">
+                          Arama süresi
+                        </span>
+                        <div className="col-span-6">
+                          <input
+                            type="range"
+                            min={1}
+                            max={15}
+                            value={analysisSearchTimeSec}
+                            onChange={(e) =>
+                              setAnalysisSearchTimeSec(Number(e.target.value))
+                            }
+                            className="w-full accent-[#1b78d0] cursor-pointer"
+                          />
+                        </div>
+                        <span className="col-span-2 text-right font-mono font-bold text-white">
+                          {analysisSearchTimeSec}s
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-12 items-center gap-2">
+                        <span className="col-span-4 text-[#bababa]">Derinlik</span>
+                        <div className="col-span-6">
+                          <input
+                            type="range"
+                            min={8}
+                            max={25}
+                            value={analysisMaxDepth}
+                            onChange={(e) =>
+                              setAnalysisMaxDepth(Number(e.target.value))
+                            }
+                            className="w-full accent-[#1b78d0] cursor-pointer"
+                          />
+                        </div>
+                        <span className="col-span-2 text-right font-mono font-bold text-white">
+                          {analysisMaxDepth}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-12 items-center gap-2">
+                        <span className="col-span-4 text-[#bababa]">
+                          Çoklu varyantlar
+                        </span>
+                        <div className="col-span-6">
+                          <input
+                            type="range"
+                            min={1}
+                            max={5}
+                            value={analysisMultiPV}
+                            onChange={(e) =>
+                              setAnalysisMultiPV(Number(e.target.value))
+                            }
+                            className="w-full accent-[#1b78d0] cursor-pointer"
+                          />
+                        </div>
+                        <span className="col-span-2 text-right font-mono font-bold text-white">
+                          {analysisMultiPV} / 5
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-12 items-center gap-2">
+                        <span className="col-span-4 text-[#bababa]">
+                          İş parçacığı
+                        </span>
+                        <div className="col-span-6">
+                          <input
+                            type="range"
+                            min={1}
+                            max={20}
+                            value={analysisThreadsSkill}
+                            onChange={(e) =>
+                              setAnalysisThreadsSkill(Number(e.target.value))
+                            }
+                            className="w-full accent-[#1b78d0] cursor-pointer"
+                          />
+                        </div>
+                        <span className="col-span-2 text-right font-mono font-bold text-white">
+                          {analysisThreadsSkill} / 20
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-12 items-center gap-2">
+                        <span className="col-span-4 text-[#bababa]">Hafıza</span>
+                        <div className="col-span-6">
+                          <input
+                            type="range"
+                            min={16}
+                            max={128}
+                            step={16}
+                            value={analysisHashMb}
+                            onChange={(e) =>
+                              setAnalysisHashMb(Number(e.target.value))
+                            }
+                            className="w-full accent-[#1b78d0] cursor-pointer"
+                          />
+                        </div>
+                        <span className="col-span-2 text-right font-mono font-bold text-white">
+                          {analysisHashMb}MB
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Canlı Çoklu Varyant Satırları (1..5) */}
+                  {engineEnabled && liveAnalysisLines.length > 0 && (
+                    <div className="px-3 py-2 bg-[#1a1816] border-b border-[#3c3934] space-y-1">
+                      {liveAnalysisLines
+                        .slice(0, analysisMultiPV)
+                        .map((line, idx) => {
+                          const scoreStr =
+                            line.type === 'mate'
+                              ? `M${Math.abs(line.value)}`
+                              : `${line.value > 0 ? '+' : ''}${line.value.toFixed(
+                                  2
+                                )}`;
+                          return (
+                            <div
+                              key={line.multipv || idx}
+                              className="flex items-center gap-2 text-xs font-mono"
+                            >
+                              <span className="text-[10px] text-[#888] w-4">
+                                #{idx + 1}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  idx === 0
+                                    ? 'bg-[#629924] text-white'
+                                    : 'bg-[#3692e7]/25 text-[#72b8ff]'
+                                }`}
+                              >
+                                {scoreStr}
+                              </span>
+                              <span className="text-[#e0e0e0] truncate">
+                                {(line.pv || []).slice(0, 6).join(' ')}
+                              </span>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+
+                  <div className="p-4 flex flex-col gap-3">
 
                   {isAnalyzingFullGame ? (
                     <div className="py-3 flex flex-col gap-2">
@@ -2096,7 +2418,7 @@ export default function App() {
                       <div className="grid grid-cols-2 gap-2">
                         <button
                           type="button"
-                          onClick={runFullGameAccuracyReview}
+                          onClick={() => runFullGameAccuracyReview()}
                           className="py-2 px-3 rounded bg-[#3692e7] hover:bg-[#48a1f2] text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow"
                         >
                           <Award className="w-3.5 h-3.5" />
@@ -2226,6 +2548,7 @@ export default function App() {
                       </button>
                     </div>
                   )}
+                  </div>
                 </div>
               )}
 
@@ -2606,65 +2929,271 @@ export default function App() {
                STOCKFISH ANALİZ STÜDYOSU, AÇILIŞ REHBERİ VE TAHTA YAPICI PANELİ
                ===================================================================== */
             <>
-              {/* KART 1: STOCKFISH CANLI ÇOKLU VARYANT (MULTI-PV) & OK KONTROLLERİ */}
+              {/* KART 1: LICHESS TARZI STOCKFISH MOTOR BAŞLIĞI, AYAR PANELİ (⚙) VE ÇOKLU VARYANTLAR (1/5 .. 5/5) */}
               <div className="bg-[#262421] border border-[#3692e7] rounded-md overflow-hidden shadow-lg flex flex-col">
-                <div className="px-4 py-2.5 bg-[#1e1c19] border-b border-[#3c3934] flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Compass className="w-4 h-4 text-[#3692e7]" />
-                    <span className="text-xs font-bold uppercase tracking-wider text-white">
-                      Stockfish 20. Seviye Analiz Stüdyosu
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
+                {/* Lichess Tarzı Üst Motor Barı: Sol Aç/Kapa Toggle + Orta Motor Bilgisi + Sağ Mavi Dişli Çark (⚙) */}
+                <div className="bg-[#1e1c19] border-b border-[#3692e7]/60 flex items-stretch justify-between">
+                  <div className="flex items-center gap-3 px-3 py-2">
+                    {/* Lichess Motor Aç/Kapa Toggle */}
                     <button
                       type="button"
-                      onClick={() => setShowAnalysisArrows((v) => !v)}
-                      className={`px-2 py-1 rounded text-[11px] font-bold border flex items-center gap-1 ${
-                        showAnalysisArrows
-                          ? 'bg-[#629924]/25 border-[#629924] text-[#8cd936]'
-                          : 'bg-[#262421] border-[#3c3934] text-[#888]'
+                      onClick={() => setEngineEnabled((v) => !v)}
+                      className={`relative w-11 h-6 rounded-full transition-colors flex items-center px-0.5 border ${
+                        engineEnabled
+                          ? 'bg-[#629924] border-[#73b32b]'
+                          : 'bg-[#3c3934] border-[#555]'
                       }`}
-                      title="Stockfish En İyi Hamle Oklarını Aç/Kapat"
+                      title={
+                        engineEnabled
+                          ? 'Stockfish Motorunu Kapat'
+                          : 'Stockfish Motorunu Aç'
+                      }
                     >
-                      {showAnalysisArrows ? (
-                        <Eye className="w-3 h-3" />
-                      ) : (
-                        <EyeOff className="w-3 h-3" />
-                      )}
-                      Motor Okları
+                      <span
+                        className={`w-4.5 h-4.5 rounded-full bg-white shadow transform transition-transform flex items-center justify-center text-[10px] font-bold ${
+                          engineEnabled
+                            ? 'translate-x-5 text-[#629924]'
+                            : 'translate-x-0 text-[#777]'
+                        }`}
+                      >
+                        {engineEnabled ? '✓' : '✕'}
+                      </span>
                     </button>
+
+                    <div className="leading-tight">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-bold text-white">
+                          SF 19 1MB
+                        </span>
+                        <span className="text-xs font-extrabold text-[#629924]">
+                          NNUE
+                        </span>
+                        <span className="text-[11px] font-mono text-[#72b8ff] ml-1">
+                          d={evalScore?.depth || analysisMaxDepth}
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-[#999] block">
+                        yerel tarayıcı üzerinde
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Sağ Taraf: Ok Kontrolleri + Lichess Mavi Dişli Çark (⚙) */}
+                  <div className="flex items-center">
+                    <div className="flex items-center gap-1 pr-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowAnalysisArrows((v) => !v)}
+                        className={`px-2 py-1 rounded text-[11px] font-bold border flex items-center gap-1 ${
+                          showAnalysisArrows
+                            ? 'bg-[#629924]/25 border-[#629924] text-[#8cd936]'
+                            : 'bg-[#262421] border-[#3c3934] text-[#888]'
+                        }`}
+                        title="Stockfish En İyi Hamle Oklarını Aç/Kapat"
+                      >
+                        {showAnalysisArrows ? (
+                          <Eye className="w-3 h-3" />
+                        ) : (
+                          <EyeOff className="w-3 h-3" />
+                        )}
+                        <span className="hidden sm:inline">Oklar</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowOpeningArrows((v) => !v)}
+                        className={`px-2 py-1 rounded text-[11px] font-bold border flex items-center gap-1 ${
+                          showOpeningArrows
+                            ? 'bg-[#f0c15c]/25 border-[#f0c15c] text-[#f5d07e]'
+                            : 'bg-[#262421] border-[#3c3934] text-[#888]'
+                        }`}
+                        title="GM2600 Açılış Kitabı Oklarını Aç/Kapat"
+                      >
+                        <BookOpen className="w-3 h-3" />
+                        <span className="hidden sm:inline">Kitap</span>
+                      </button>
+                    </div>
+
                     <button
                       type="button"
-                      onClick={() => setShowOpeningArrows((v) => !v)}
-                      className={`px-2 py-1 rounded text-[11px] font-bold border flex items-center gap-1 ${
-                        showOpeningArrows
-                          ? 'bg-[#f0c15c]/25 border-[#f0c15c] text-[#f5d07e]'
-                          : 'bg-[#262421] border-[#3c3934] text-[#888]'
+                      onClick={() => setShowEngineSettings((v) => !v)}
+                      className={`h-full px-3.5 flex items-center justify-center transition-colors ${
+                        showEngineSettings
+                          ? 'bg-[#1b78d0] text-white'
+                          : 'bg-[#262421] hover:bg-[#302e2c] text-[#bababa] border-l border-[#3c3934]'
                       }`}
-                      title="Açılış Kitabı Devam Yolu Oklarını Aç/Kapat"
+                      title="Stockfish Analiz Motoru Ayarları (Arama Süresi, Derinlik, Çoklu Varyant 1-5, Hafıza)"
                     >
-                      <BookOpen className="w-3 h-3" />
-                      Açılış Okları
+                      <Settings className="w-4 h-4" />
                     </button>
                   </div>
                 </div>
 
-                {/* Stockfish En İyi 3 Devam Yolu (Multi-PV) */}
-                {!isBoardEditorOpen && (
-                  <div className="p-3 bg-[#1a1816] border-b border-[#3c3934] space-y-1.5">
-                    <div className="text-[11px] font-semibold text-[#999] flex items-center justify-between">
-                      <span>Stockfish Önerilen Devam Yolları (Tıkla & Oyna):</span>
-                      <span className="font-mono text-[#8cd936]">
-                        Derinlik: {evalScore?.depth || 12}
+                {/* LICHESS BİREBİR ÖZELLEŞTİRİLEBİLİR MOTOR AYARLARI MENÜSÜ */}
+                {showEngineSettings && (
+                  <div className="p-4 bg-[#22201d] border-b-2 border-[#3692e7] flex flex-col gap-3.5 text-xs shadow-inner">
+                    {/* Motor Seçimi */}
+                    <div className="grid grid-cols-12 items-center gap-2">
+                      <span className="col-span-4 text-[#bababa] font-medium">
+                        Motor
+                      </span>
+                      <div className="col-span-8">
+                        <select
+                          value={engineVariantName}
+                          onChange={(e) => setEngineVariantName(e.target.value)}
+                          className="w-full px-2.5 py-1.5 rounded bg-[#161512] border border-[#3692e7] text-white text-xs font-medium outline-none"
+                        >
+                          <option value="Stockfish 19 · 1MB NNUE">
+                            Stockfish 19 · 1MB NNUE
+                          </option>
+                          <option value="Stockfish 16 · 7MB NNUE">
+                            Stockfish 16 · 7MB NNUE (Derin)
+                          </option>
+                          <option value="Stockfish ASM · Hızlı">
+                            Stockfish ASM · Hızlı Tarayıcı
+                          </option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Arama Süresi (Search Time: 1s .. 15s) */}
+                    <div className="grid grid-cols-12 items-center gap-2">
+                      <span className="col-span-4 text-[#bababa] font-medium">
+                        Arama süresi
+                      </span>
+                      <div className="col-span-6 flex items-center">
+                        <input
+                          type="range"
+                          min={1}
+                          max={15}
+                          step={1}
+                          value={analysisSearchTimeSec}
+                          onChange={(e) =>
+                            setAnalysisSearchTimeSec(Number(e.target.value))
+                          }
+                          className="w-full accent-[#1b78d0] cursor-pointer h-1.5 bg-[#161512] rounded-lg"
+                        />
+                      </div>
+                      <span className="col-span-2 text-right font-mono font-bold text-white">
+                        {analysisSearchTimeSec}s
                       </span>
                     </div>
 
-                    {liveAnalysisLines.length === 0 ? (
+                    {/* Maksimum Derinlik (Depth: 8 .. 25) */}
+                    <div className="grid grid-cols-12 items-center gap-2">
+                      <span className="col-span-4 text-[#bababa] font-medium">
+                        Derinlik (Depth)
+                      </span>
+                      <div className="col-span-6 flex items-center">
+                        <input
+                          type="range"
+                          min={8}
+                          max={25}
+                          step={1}
+                          value={analysisMaxDepth}
+                          onChange={(e) =>
+                            setAnalysisMaxDepth(Number(e.target.value))
+                          }
+                          className="w-full accent-[#1b78d0] cursor-pointer h-1.5 bg-[#161512] rounded-lg"
+                        />
+                      </div>
+                      <span className="col-span-2 text-right font-mono font-bold text-white">
+                        {analysisMaxDepth}
+                      </span>
+                    </div>
+
+                    {/* Çoklu Varyantlar (Multi-PV: 1 / 5 .. 5 / 5) */}
+                    <div className="grid grid-cols-12 items-center gap-2">
+                      <span className="col-span-4 text-[#bababa] font-medium">
+                        Çoklu varyantlar
+                      </span>
+                      <div className="col-span-6 flex items-center">
+                        <input
+                          type="range"
+                          min={1}
+                          max={5}
+                          step={1}
+                          value={analysisMultiPV}
+                          onChange={(e) =>
+                            setAnalysisMultiPV(Number(e.target.value))
+                          }
+                          className="w-full accent-[#1b78d0] cursor-pointer h-1.5 bg-[#161512] rounded-lg"
+                        />
+                      </div>
+                      <span className="col-span-2 text-right font-mono font-bold text-white">
+                        {analysisMultiPV} / 5
+                      </span>
+                    </div>
+
+                    {/* İş Parçacığı / Motor Gücü (1 / 20 .. 20 / 20) */}
+                    <div className="grid grid-cols-12 items-center gap-2">
+                      <span className="col-span-4 text-[#bababa] font-medium">
+                        İş parçacığı
+                      </span>
+                      <div className="col-span-6 flex items-center">
+                        <input
+                          type="range"
+                          min={1}
+                          max={20}
+                          step={1}
+                          value={analysisThreadsSkill}
+                          onChange={(e) =>
+                            setAnalysisThreadsSkill(Number(e.target.value))
+                          }
+                          className="w-full accent-[#1b78d0] cursor-pointer h-1.5 bg-[#161512] rounded-lg"
+                        />
+                      </div>
+                      <span className="col-span-2 text-right font-mono font-bold text-white">
+                        {analysisThreadsSkill} / 20
+                      </span>
+                    </div>
+
+                    {/* Hafıza (Hash: 16MB .. 128MB) */}
+                    <div className="grid grid-cols-12 items-center gap-2">
+                      <span className="col-span-4 text-[#bababa] font-medium">
+                        Hafıza
+                      </span>
+                      <div className="col-span-6 flex items-center">
+                        <input
+                          type="range"
+                          min={16}
+                          max={128}
+                          step={16}
+                          value={analysisHashMb}
+                          onChange={(e) =>
+                            setAnalysisHashMb(Number(e.target.value))
+                          }
+                          className="w-full accent-[#1b78d0] cursor-pointer h-1.5 bg-[#161512] rounded-lg"
+                        />
+                      </div>
+                      <span className="col-span-2 text-right font-mono font-bold text-white">
+                        {analysisHashMb}MB
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Stockfish En İyi Devam Yolları (Seçilen Çoklu Varyant 1..5 Sayısına Göre) */}
+                {!isBoardEditorOpen && (
+                  <div className="p-3 bg-[#1a1816] border-b border-[#3c3934] space-y-1.5">
+                    <div className="text-[11px] font-semibold text-[#999] flex items-center justify-between">
+                      <span>
+                        Stockfish Devam Yolları ({analysisMultiPV} Varyant • Tıkla & Oyna):
+                      </span>
+                      <span className="font-mono text-[#8cd936]">
+                        Derinlik: {evalScore?.depth || analysisMaxDepth} / {analysisMaxDepth}
+                      </span>
+                    </div>
+
+                    {!engineEnabled ? (
+                      <div className="text-xs text-[#777] py-2">
+                        Stockfish motoru kapalı. Sol üstteki anahtardan açabilirsiniz.
+                      </div>
+                    ) : liveAnalysisLines.length === 0 ? (
                       <div className="text-xs text-[#777] py-2">
                         Stockfish varyantları hesaplıyor...
                       </div>
                     ) : (
-                      liveAnalysisLines.slice(0, 3).map((line, idx) => {
+                      liveAnalysisLines.slice(0, analysisMultiPV).map((line, idx) => {
                         const scoreStr =
                           line.type === 'mate'
                             ? `M${Math.abs(line.value)}`
@@ -2686,6 +3215,9 @@ export default function App() {
                             }}
                             className="flex items-center gap-2 px-2.5 py-1.5 rounded bg-[#262421] hover:bg-[#302e2c] border border-[#3c3934] cursor-pointer transition-colors"
                           >
+                            <span className="text-[10px] font-mono text-[#888] w-4">
+                              #{idx + 1}
+                            </span>
                             <span
                               className={`px-1.5 py-0.5 rounded text-[11px] font-extrabold font-mono ${
                                 idx === 0
@@ -2696,7 +3228,7 @@ export default function App() {
                               {scoreStr}
                             </span>
                             <span className="text-xs font-mono text-[#e0e0e0] truncate">
-                              {(line.pv || []).slice(0, 6).join(' ')}
+                              {(line.pv || []).slice(0, 7).join(' ')}
                             </span>
                           </div>
                         );

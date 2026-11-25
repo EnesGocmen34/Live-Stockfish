@@ -727,9 +727,15 @@ export function AccountScout({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs sm:text-sm font-bold text-white">
-                          vs. {g.opponentName} ({g.opponentRating})
+                          {g.userName || username} ({g.userRating})
                         </span>
-                        <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#161512] border border-[#3c3934] text-[#bababa]">
+                        <span className="text-xs font-extrabold text-[#e68a2e]">
+                          vs.
+                        </span>
+                        <span className="text-xs sm:text-sm font-bold text-[#8cd936]">
+                          {g.opponentName || 'Rakip'} ({g.opponentRating})
+                        </span>
+                        <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#161512] border border-[#3c3934] text-[#f5d07e] font-semibold">
                           {g.openingName}
                         </span>
                         <span className="text-[11px] text-[#888]">
@@ -758,8 +764,11 @@ export function AccountScout({
                               Oyun Sonu: %{g.deepAnalysis.endgameAccuracy}
                             </span>
                           )}
+                          <span className="text-[#f4a456]">
+                            ({g.deepAnalysis.mistakes || 0} Hata ?
+                          </span>
                           <span className="text-[#ff7373]">
-                            ({g.deepAnalysis.blunders} Büyük Hata)
+                            • {g.deepAnalysis.blunders || 0} Büyük Hata ??)
                           </span>
                         </div>
                       )}
