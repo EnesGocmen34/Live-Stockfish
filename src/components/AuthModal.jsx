@@ -122,7 +122,7 @@ export default function AuthModal({ isOpen, onClose, client, onSuccess }) {
                 </span>
                 <input
                   type="text"
-                  placeholder="örn: @enes veya enes@mail.com"
+                  placeholder="örn: @johndoe veya johndoe@mail.com"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   required
@@ -172,7 +172,7 @@ export default function AuthModal({ isOpen, onClose, client, onSuccess }) {
                 </span>
                 <input
                   type="text"
-                  placeholder="akifg"
+                  placeholder="johndoe"
                   value={username.replace(/^@/, '')}
                   onChange={(e) =>
                     setUsername(e.target.value.replace(/\s+/g, ''))
